@@ -32,6 +32,13 @@
 #include "max30102.h"
 
 /*------------------------------------ DEFINE ------------------------------------ */
+//WIFI
+#define WIFI_SSID "Pumeo"
+#define WIFI_PASSWORD "01234567"
+
+//MQTT
+#define MQTT_BROKER_URL  "mqtt://172.20.10.6:1883"
+
 // RTC
 #define CONFIG_RTC_I2C_PORT 0
 #define  CONFIG_RTC_PIN_NUM_SDA 26
@@ -132,8 +139,8 @@ void WIFI_initSTA(void)
 
     wifi_config_t wifi_config = {
         .sta = {
-            .ssid = "Nghe House 2",
-            .password = "@ngoinhavuive",
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
             /* Authmode threshold resets to WPA2 ass default if password matches WPA2 standards (pasword len => 8).
              * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
              * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
@@ -352,7 +359,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = "mqtt://192.168.1.21:1883",
+        .broker.address.uri = MQTT_BROKER_URL,
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
@@ -479,10 +486,10 @@ void readINMP441Task(void* parameter) {
     TickType_t startTime = xTaskGetTickCount();
     size_t bytesRead;
     char data_temp[16] = {0};
-    char nameFilePCG[64] = {0};
 
     struct tm timeTemp = {0};
     ds3231_get_time(&ds3231_device, &timeTemp); // Lấy thời gian thực
+    memset(nameFilePCG, 0, sizeof(nameFilePCG));
     sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
 
     while (1) {
@@ -662,9 +669,9 @@ void app_main(void)
     ds3231_set_time(&ds3231_device, &timeInfo);
 
     // Create tasks
-    xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 0);
-    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 10, &readINMTask_handle, 0);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
-    xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  10, &saveToSDTask_handle, 1);
+    xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 1);
+    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 8, &readINMTask_handle, 0);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
+    xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  5, &saveToSDTask_handle, 0);
 
     //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);
     //xTaskCreatePinnedToCore(listenFromMQTT, "listenFromMQTT", 1024 * 3,NULL,  5, &listenFromMQTT_handle, 0);
