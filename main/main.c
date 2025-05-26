@@ -15,6 +15,7 @@
 #include <freertos/ringbuf.h>
 #include <esp_log.h>
 #include <esp_vfs.h>
+#include <freertos/semphr.h>
 
 #include "mqtt_client.h"
 #include "driver/gpio.h"
@@ -33,11 +34,11 @@
 
 /*------------------------------------ DEFINE ------------------------------------ */
 //WIFI
-#define WIFI_SSID "Pumeo"
-#define WIFI_PASSWORD "01234567"
+#define WIFI_SSID "Nghe House 2"
+#define WIFI_PASSWORD "@ngoinhavuive"
 
 //MQTT
-#define MQTT_BROKER_URL  "mqtt://172.20.10.6:1883"
+#define MQTT_BROKER_URL  "mqtt://192.168.1.19:1883"
 
 // RTC
 #define CONFIG_RTC_I2C_PORT 0
@@ -368,7 +369,8 @@ static void mqtt_app_start(void)
 }
 
 /*-------------------------------------TASKS--------------------------------------------*/
-
+SemaphoreHandle_t mutex_max;
+SemaphoreHandle_t mutex_inm;
 /**
  * @brief Read data from MAX30102 and send to ring buffer
  * 
@@ -424,20 +426,28 @@ void max30102_test(void* parameter)
             red = max30102_getFIFORed(&record);
             ir = max30102_getFIFOIR(&record);
             memset(data_temp, 0, sizeof(data_temp));
-            sprintf(data_temp, "%lu,%lu\n", red, ir);
-            strcat(data_max, data_temp);
+            if (xSemaphoreTake(mutex_max, portMAX_DELAY)) {
+                sprintf(data_temp, "%lu,%lu\n", red, ir);
+                if (strlen(data_max) + strlen(data_temp) < sizeof(data_max)) {
+                    strcat(data_max, data_temp);
+                    }
+                xSemaphoreGive(mutex_max);
+            }
             max30102_nextSample(&record); //We're finished with this sample so move to next sample
         }
         //ESP_LOGI(__func__, "Print data_max = %s", data_max);
-        if (samplesTaken >= 25) 
-        {
-            // Gửi vào ringbuffer
-            bool res = pdFALSE;
-            while (res != pdTRUE) {
-                res = xRingbufferSend(buf_handle_max, data_max, strlen(data_max), pdMS_TO_TICKS(5));
-            }           
-            samplesTaken = 0;
-            memset(data_max, 0, sizeof(data_max));
+        if (samplesTaken >= 25) {
+            if (xSemaphoreTake(mutex_max, portMAX_DELAY)) {
+                BaseType_t res = xRingbufferSend(buf_handle_max, data_max, strlen(data_max), pdMS_TO_TICKS(100));
+                if (res != pdTRUE) {
+                    //ESP_LOGW(__func__, "Failed to send data to ringbuffer, buffer may be full");
+                    // Có thể thêm logic xử lý khi buffer đầy ở đây
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                samplesTaken = 0;
+                memset(data_max, 0, sizeof(data_max));
+                xSemaphoreGive(mutex_max);
+            }
         }
         TickType_t currentTime = xTaskGetTickCount(); // Get the current tick count
         TickType_t elapsedTime = currentTime - startTime; // Calculate the elapsed time
@@ -509,17 +519,27 @@ void readINMP441Task(void* parameter) {
         for (int i = 0; i < samplesRead; i++) {
             int16_t sample = (int16_t)(buffer32[i] >> 8); // Lấy 16-bit có ý nghĩa từ 24-bit gốc
             buffer16[i] = sample;
-
-            snprintf(data_temp, sizeof(data_temp), "%d\n", sample);
-            strncat(data_inm, data_temp, sizeof(data_inm) - strlen(data_inm) - 1);
+            memset(data_temp, 0, sizeof(data_temp)); 
+            if (xSemaphoreTake(mutex_inm, portMAX_DELAY)) {
+                snprintf(data_temp, sizeof(data_temp), "%d\n", sample);
+                if (strlen(data_inm) + strlen(data_temp) < sizeof(data_inm)) {
+                    strcat(data_inm, data_temp);
+                }
+                xSemaphoreGive(mutex_inm);
+            }
         }
 
         // Gửi vào ringbuffer
-        bool res = pdFALSE;
-        while (res != pdTRUE) {
-            res = xRingbufferSend(buf_handle_inm, data_inm, strlen(data_inm), pdMS_TO_TICKS(10));
+        if (xSemaphoreTake(mutex_inm, portMAX_DELAY)) {
+            BaseType_t res = xRingbufferSend(buf_handle_inm, data_inm, strlen(data_inm), pdMS_TO_TICKS(100));
+            if (res != pdTRUE) {
+                //ESP_LOGW(__func__, "Failed to send data to ringbuffer, buffer may be full");
+                // Có thể thêm logic xử lý khi buffer đầy ở đây
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            memset(data_inm, 0, sizeof(data_inm));
+            xSemaphoreGive(mutex_inm);
         }
-        memset(data_inm, 0, sizeof(data_inm));
 
         // Cập nhật tên file mỗi 15 giây
         TickType_t currentTime = xTaskGetTickCount();
@@ -529,7 +549,7 @@ void readINMP441Task(void* parameter) {
             ds3231_get_time(&ds3231_device, &timeTemp);
             sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
 
-            ESP_LOGI(__func__, "Bắt đầu file mới: %s", nameFilePCG);
+            ESP_LOGI(__func__, "Get data INMP441 start file: %s", nameFilePCG);
             startTime = currentTime;
         }
     }
@@ -550,11 +570,16 @@ void saveINMPAndMAXToSDTask(void *parameter) {
         if (item1 != NULL) {
             //Return Item
             // Serial.println("r");
-            vRingbufferReturnItem(buf_handle_inm, (void *)item1);
+            //vRingbufferReturnItem(buf_handle_inm, (void *)item1);
             //TickType_t startTime = xTaskGetTickCount(); // Get the current tick count
-            sdcard_writeDataToFile_noArgument(nameFilePCG, item1);
+            //sdcard_writeDataToFile_noArgument(nameFilePCG, item1);
             //TickType_t currentTime = xTaskGetTickCount(); // Get the current tick count
             //ESP_LOGE(__func__,"Time save data: %ld\n", currentTime - startTime);
+            if (xSemaphoreTake(mutex_inm, portMAX_DELAY)) {
+                vRingbufferReturnItem(buf_handle_inm, (void *)item1);
+                sdcard_writeDataToFile_noArgument(nameFilePCG, item1);
+                xSemaphoreGive(mutex_inm);
+            }
         }
         else{
             ESP_LOGE(__func__,"item1 is null");
@@ -564,11 +589,12 @@ void saveINMPAndMAXToSDTask(void *parameter) {
         char *item2 = (char *)xRingbufferReceive(buf_handle_max, &item_size2, 1);
         
         if (item2 != NULL) {
-        //     //Return Item
-        //     // Serial.println("rev");
-            vRingbufferReturnItem(buf_handle_max, (void *)item2);
-            sdcard_writeDataToFile_noArgument(nameFilePPG, item2);
-        } 
+            if (xSemaphoreTake(mutex_max, portMAX_DELAY)) {
+                vRingbufferReturnItem(buf_handle_max, (void *)item2);
+                sdcard_writeDataToFile_noArgument(nameFilePPG, item2);
+                xSemaphoreGive(mutex_max);
+            }
+        }
         else{
             ESP_LOGE(__func__,"item2 is null");
         }
@@ -620,6 +646,13 @@ void app_main(void)
     sdmmc_card_t SDCARD;
     ESP_ERROR_CHECK(sdcard_initialize(&mount_config_t, &SDCARD, &host_t, &spi_bus_config_t, &slot_config));
 
+    //Initialize semaphore
+    mutex_max = xSemaphoreCreateMutex();
+    mutex_inm = xSemaphoreCreateMutex();
+    if (mutex_max == NULL || mutex_inm == NULL) {
+        ESP_LOGE(__func__, "Failed to create mutex");
+    }
+
     // Initialise ring buffers
     buf_handle_max = xRingbufferCreate(1028 * 6, RINGBUF_TYPE_NOSPLIT);
     buf_handle_inm = xRingbufferCreate(1028 * 15, RINGBUF_TYPE_NOSPLIT);
@@ -670,8 +703,8 @@ void app_main(void)
 
     // Create tasks
     xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 1);
-    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 8, &readINMTask_handle, 0);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
-    xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  5, &saveToSDTask_handle, 0);
+    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 8, &readINMTask_handle, 1);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
+    xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  10, &saveToSDTask_handle, 0);
 
     //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);
     //xTaskCreatePinnedToCore(listenFromMQTT, "listenFromMQTT", 1024 * 3,NULL,  5, &listenFromMQTT_handle, 0);
