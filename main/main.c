@@ -34,11 +34,11 @@
 
 /*------------------------------------ DEFINE ------------------------------------ */
 //WIFI
-#define WIFI_SSID "Nghe House 2"
+#define WIFI_SSID "Nghe House"
 #define WIFI_PASSWORD "@ngoinhavuive"
 
 //MQTT
-#define MQTT_BROKER_URL  "mqtt://192.168.1.19:1883"
+#define MQTT_BROKER_URL  "mqtt://192.168.1.16:1883"
 
 // RTC
 #define CONFIG_RTC_I2C_PORT 0
@@ -49,22 +49,25 @@
 RingbufHandle_t buf_handle_max;
 RingbufHandle_t buf_handle_inm;
 
-#define bufferCount 6
-#define bufferLen 32
-#define receiveBufferLen ((bufferLen * 32 / 8)  * bufferCount / 2)
+// #define bufferCount 6
+// #define bufferLen 32
+//#define receiveBufferLen ((bufferLen * 32 / 8)  * bufferCount / 2)
 //Buffer de luu tru du lieu doc duoc tu buffer DMA
 //Chuyen doi tu byte DMA sang so luong mau cua moi buffer 
 static int16_t buffer16[DMA_BUFFER_SIZE / sizeof(int32_t) * 3 / 2] = {0}; //288 samples (576 bytes) de luu duoc 3 bytes sau khi dich cua buffer32
 static int32_t buffer32[DMA_BUFFER_SIZE / sizeof(int32_t)] = {0}; //192 samples (768 bytes)
 
-TaskHandle_t readINMP441_handle = NULL;
+// Buffers to store data read from dma buffers
+// static int16_t buffer16[receiveBufferLen / 4] = {0};
+// static uint8_t buffer32[receiveBufferLen] = {0};
+//TaskHandle_t readINMP441_handle = NULL;
 
 //Tao kenh rx
 i2s_chan_handle_t rx_channel = NULL; 
 
 // Data buffer to send to ringbuffer
 static char data_max[400] = "";
-static char data_inm[receiveBufferLen / 4 * 6] = ""; // Should not be to big. For some reason, I set its size 1536B and it fails ???
+//static char data_inm[receiveBufferLen / 4 * 6] = ""; // Should not be to big. For some reason, I set its size 1536B and it fails ???
 
 TaskHandle_t readMAXTask_handle = NULL;
 TaskHandle_t readINMTask_handle = NULL;
@@ -426,28 +429,16 @@ void max30102_test(void* parameter)
             red = max30102_getFIFORed(&record);
             ir = max30102_getFIFOIR(&record);
             memset(data_temp, 0, sizeof(data_temp));
-            if (xSemaphoreTake(mutex_max, portMAX_DELAY)) {
-                sprintf(data_temp, "%lu,%lu\n", red, ir);
-                if (strlen(data_max) + strlen(data_temp) < sizeof(data_max)) {
-                    strcat(data_max, data_temp);
-                    }
-                xSemaphoreGive(mutex_max);
-            }
+            sprintf(data_temp, "%lu,%lu\n", red, ir);
+            strcat(data_max, data_temp);
             max30102_nextSample(&record); //We're finished with this sample so move to next sample
         }
         //ESP_LOGI(__func__, "Print data_max = %s", data_max);
-        if (samplesTaken >= 25) {
-            if (xSemaphoreTake(mutex_max, portMAX_DELAY)) {
-                BaseType_t res = xRingbufferSend(buf_handle_max, data_max, strlen(data_max), pdMS_TO_TICKS(100));
-                if (res != pdTRUE) {
-                    //ESP_LOGW(__func__, "Failed to send data to ringbuffer, buffer may be full");
-                    // Có thể thêm logic xử lý khi buffer đầy ở đây
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                }
-                samplesTaken = 0;
-                memset(data_max, 0, sizeof(data_max));
-                xSemaphoreGive(mutex_max);
-            }
+        if (samplesTaken >= 25) 
+        {
+            xRingbufferSend(buf_handle_max, data_max, sizeof(data_max), pdMS_TO_TICKS(5));
+            samplesTaken = 0;
+            memset(data_max, 0, sizeof(data_max));
         }
         TickType_t currentTime = xTaskGetTickCount(); // Get the current tick count
         TickType_t elapsedTime = currentTime - startTime; // Calculate the elapsed time
@@ -472,6 +463,7 @@ void max30102_test(void* parameter)
     //vTaskDelete(NULL);
 }
 
+
 static void initialize_nvs(void)
 {
     esp_err_t error = nvs_flash_init();
@@ -495,7 +487,10 @@ void readINMP441Task(void* parameter) {
 
     TickType_t startTime = xTaskGetTickCount();
     size_t bytesRead;
-    char data_temp[16] = {0};
+    //char data_temp[16] = {0};
+    char temp_buffer[768] = {0}; // đủ để lưu 100–150 mẫu
+    size_t offset = 0;
+
 
     struct tm timeTemp = {0};
     ds3231_get_time(&ds3231_device, &timeTemp); // Lấy thời gian thực
@@ -518,71 +513,76 @@ void readINMP441Task(void* parameter) {
         int samplesRead = bytesRead / sizeof(int32_t);
         for (int i = 0; i < samplesRead; i++) {
             int16_t sample = (int16_t)(buffer32[i] >> 8); // Lấy 16-bit có ý nghĩa từ 24-bit gốc
-            buffer16[i] = sample;
-            memset(data_temp, 0, sizeof(data_temp)); 
-            if (xSemaphoreTake(mutex_inm, portMAX_DELAY)) {
-                snprintf(data_temp, sizeof(data_temp), "%d\n", sample);
-                if (strlen(data_inm) + strlen(data_temp) < sizeof(data_inm)) {
-                    strcat(data_inm, data_temp);
-                }
-                xSemaphoreGive(mutex_inm);
-            }
+            buffer16[i] = sample; 
+            int len = snprintf(temp_buffer + offset, sizeof(temp_buffer) - offset, "%d\n",buffer16[i]);
+            if (len < 0 || len >= (int)(sizeof(temp_buffer) - offset)) break; // tránh tràn
+            offset += len;
         }
-
         // Gửi vào ringbuffer
-        if (xSemaphoreTake(mutex_inm, portMAX_DELAY)) {
-            BaseType_t res = xRingbufferSend(buf_handle_inm, data_inm, strlen(data_inm), pdMS_TO_TICKS(100));
-            if (res != pdTRUE) {
-                //ESP_LOGW(__func__, "Failed to send data to ringbuffer, buffer may be full");
-                // Có thể thêm logic xử lý khi buffer đầy ở đây
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-            memset(data_inm, 0, sizeof(data_inm));
-            xSemaphoreGive(mutex_inm);
+        if (offset > 0) {
+            xRingbufferSend(buf_handle_inm, temp_buffer, offset, pdMS_TO_TICKS(100));
+            offset = 0;
+            memset(temp_buffer, 0, sizeof(temp_buffer));
         }
-
         // Cập nhật tên file mỗi 15 giây
         TickType_t currentTime = xTaskGetTickCount();
         if ((currentTime - startTime) >= pdMS_TO_TICKS(15000)) {
+            vTaskDelay(pdMS_TO_TICKS(10));
             publish_message("message/nameFilePCG", nameFilePCG);
 
             ds3231_get_time(&ds3231_device, &timeTemp);
             sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
-
+            vTaskDelay(pdMS_TO_TICKS(10));  // đảm bảo tên đã cập nhật xong
             ESP_LOGI(__func__, "Get data INMP441 start file: %s", nameFilePCG);
             startTime = currentTime;
         }
     }
 }
 
+
+
 /**
  * @brief Receive data from 2 ring buffers and save them to SD card
  * 
  * @param parameter 
  */
+#define COMBINED_BUFFER_SIZE 2048
+
 void saveINMPAndMAXToSDTask(void *parameter) {
+    static char combined_buffer[COMBINED_BUFFER_SIZE] = {0};
+    static size_t total_len = 0;
+    TickType_t lastWriteTime = xTaskGetTickCount();
     while(1) {
         size_t item_size1;
         size_t item_size2;
         //Receive an item from no-split INMP441 ring buffer
         char *item1 = (char *)xRingbufferReceive(buf_handle_inm, &item_size1, 1);
         
-        if (item1 != NULL) {
-            //Return Item
-            // Serial.println("r");
-            //vRingbufferReturnItem(buf_handle_inm, (void *)item1);
-            //TickType_t startTime = xTaskGetTickCount(); // Get the current tick count
-            //sdcard_writeDataToFile_noArgument(nameFilePCG, item1);
-            //TickType_t currentTime = xTaskGetTickCount(); // Get the current tick count
-            //ESP_LOGE(__func__,"Time save data: %ld\n", currentTime - startTime);
-            if (xSemaphoreTake(mutex_inm, portMAX_DELAY)) {
-                vRingbufferReturnItem(buf_handle_inm, (void *)item1);
-                sdcard_writeDataToFile_noArgument(nameFilePCG, item1);
-                xSemaphoreGive(mutex_inm);
+        if (item1 != NULL && item_size1 > 0) {
+            // Nếu dữ liệu nhận được không vượt quá buffer tổng
+            if (total_len + item_size1 < COMBINED_BUFFER_SIZE) {
+                memcpy(combined_buffer + total_len, item1, item_size1);
+                total_len += item_size1;
+            } else {
+                ESP_LOGW(__func__, "combined_buffer full, writing early...");
             }
+
+            vRingbufferReturnItem(buf_handle_inm, (void *)item1);
         }
-        else{
-            ESP_LOGE(__func__,"item1 is null");
+
+        // Kiểm tra điều kiện ghi (mỗi 500ms hoặc buffer đầy)
+        TickType_t now = xTaskGetTickCount();
+        if (total_len > 0 && (now - lastWriteTime >= pdMS_TO_TICKS(500) || total_len >= 1024)) {
+            esp_err_t err = sdcard_writeDataToFile_noArgument(nameFilePCG, combined_buffer);
+            if (err != ESP_OK) {
+                ESP_LOGE(__func__, "Failed to write: %s", esp_err_to_name(err));
+            } else {
+                ESP_LOGI(__func__, "Wrote %d bytes to file", total_len);
+            }
+
+            total_len = 0;
+            memset(combined_buffer, 0, sizeof(combined_buffer));
+            lastWriteTime = now;
         }
 
         //Receive an item from no-split MAX30102 ring buffer
@@ -595,9 +595,9 @@ void saveINMPAndMAXToSDTask(void *parameter) {
                 xSemaphoreGive(mutex_max);
             }
         }
-        else{
-            ESP_LOGE(__func__,"item2 is null");
-        }
+        // else{
+        //     ESP_LOGE(__func__,"item2 is null");
+        // }
     }
 }
 void sntp_init_func()
@@ -702,9 +702,9 @@ void app_main(void)
     ds3231_set_time(&ds3231_device, &timeInfo);
 
     // Create tasks
-    xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 1);
-    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 8, &readINMTask_handle, 1);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
-    xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  10, &saveToSDTask_handle, 0);
+    xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 0);
+    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 12, &readINMTask_handle, 0);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
+    xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  10, &saveToSDTask_handle, 1);
 
     //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);
     //xTaskCreatePinnedToCore(listenFromMQTT, "listenFromMQTT", 1024 * 3,NULL,  5, &listenFromMQTT_handle, 0);

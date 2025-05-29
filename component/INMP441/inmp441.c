@@ -6,7 +6,7 @@ void i2s_install(i2s_chan_handle_t **rx_channel){
     //Cau hinh kenh rx cho i2s
     i2s_chan_config_t chan_cfg = {
         .id = I2S_NUM,
-        .role = I2S_ROLE_MASTER,
+        .role = I2S_ROLE_MASTER,  // hoặc I2S_ROLE_MASTER_RX nếu định nghĩa có
         .dma_desc_num = dmaDesc, //6 * 128 = 768
         .dma_frame_num = dmaLen, //128 bytes
         .auto_clear = true, 
