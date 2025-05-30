@@ -66,7 +66,7 @@ static int32_t buffer32[DMA_BUFFER_SIZE / sizeof(int32_t)] = {0}; //192 samples 
 i2s_chan_handle_t rx_channel = NULL; 
 
 // Data buffer to send to ringbuffer
-static char data_max[400] = "";
+//static char data_max[1024] = "";
 //static char data_inm[receiveBufferLen / 4 * 6] = ""; // Should not be to big. For some reason, I set its size 1536B and it fails ???
 
 TaskHandle_t readMAXTask_handle = NULL;
@@ -406,7 +406,8 @@ void max30102_test(void* parameter)
     
 
     uint16_t samplesTaken = 0;
-    char data_temp[16] = "";
+    size_t offset = 0;
+    char temp_buffer[1024] = {0};
     unsigned long red;
     unsigned long ir;
     
@@ -420,31 +421,37 @@ void max30102_test(void* parameter)
     sprintf(nameFilePPG,"%s_%d_%d_%d", "PPG",timeTemp.tm_hour,timeTemp.tm_min,timeTemp.tm_sec);
     while (1)
     {
+        vTaskDelay(1);
         number_samples = max30102_check(&record, &dev); //Check the sensor, read up to 3 samples
         while (max30102_available(&record)) //do we have new data?
         {
             int numberOfSamples = record.head - record.tail;
-
-            samplesTaken++;
             red = max30102_getFIFORed(&record);
             ir = max30102_getFIFOIR(&record);
-            memset(data_temp, 0, sizeof(data_temp));
-            sprintf(data_temp, "%lu,%lu\n", red, ir);
-            strcat(data_max, data_temp);
+            int len = snprintf(temp_buffer + offset, sizeof(temp_buffer) - offset, "%lu,%lu\n", red, ir);
+            if (len > 0 && (offset + len) < sizeof(temp_buffer)) {
+                offset += len;
+                samplesTaken++;
+            }
             max30102_nextSample(&record); //We're finished with this sample so move to next sample
         }
         //ESP_LOGI(__func__, "Print data_max = %s", data_max);
-        if (samplesTaken >= 25) 
-        {
-            xRingbufferSend(buf_handle_max, data_max, sizeof(data_max), pdMS_TO_TICKS(5));
+        if (offset >= 512 || samplesTaken >= 25) {
+            BaseType_t result = xRingbufferSend(buf_handle_max, temp_buffer, offset, pdMS_TO_TICKS(5));
+            if (result != pdTRUE) {
+                ESP_LOGW(__func__, "Ringbuffer MAX full, mất mẫu.");
+            }
             samplesTaken = 0;
-            memset(data_max, 0, sizeof(data_max));
-        }
+            offset = 0;
+            memset(temp_buffer, 0, sizeof(temp_buffer));
+        }       
+
         TickType_t currentTime = xTaskGetTickCount(); // Get the current tick count
         TickType_t elapsedTime = currentTime - startTime; // Calculate the elapsed time
         if (elapsedTime >= pdMS_TO_TICKS(15000)) // Check if 10 seconds have passed
         { 
-            TickType_t start2 = xTaskGetTickCount(); 
+            TickType_t start2 = xTaskGetTickCount();
+            vTaskDelay(pdMS_TO_TICKS(10)); 
             publish_message("message/nameFilePPG", nameFilePPG);
             memset(nameFilePPG,0,sizeof(nameFilePPG));
             ds3231_get_time(&ds3231_device, &timeTemp);
@@ -502,6 +509,7 @@ void readINMP441Task(void* parameter) {
 
         // Đọc dữ liệu từ microphone
         esp_err_t ret = i2s_channel_read(rx_channel, &buffer32, sizeof(buffer32), &bytesRead, 100);
+        vTaskDelay(pdMS_TO_TICKS(100));
         if (ret == ESP_ERR_TIMEOUT) {
             ESP_LOGE(__func__, "Timeout khi đọc dữ liệu: %s", esp_err_to_name(ret));
             continue;
@@ -520,7 +528,10 @@ void readINMP441Task(void* parameter) {
         }
         // Gửi vào ringbuffer
         if (offset > 0) {
-            xRingbufferSend(buf_handle_inm, temp_buffer, offset, pdMS_TO_TICKS(100));
+            BaseType_t result = xRingbufferSend(buf_handle_inm, temp_buffer, offset, pdMS_TO_TICKS(100));
+            if (result != pdTRUE) {
+                ESP_LOGW(__func__, "Ringbuffer INMP full, mất mẫu.");
+            }
             offset = 0;
             memset(temp_buffer, 0, sizeof(temp_buffer));
         }
@@ -547,11 +558,15 @@ void readINMP441Task(void* parameter) {
  * @param parameter 
  */
 #define COMBINED_BUFFER_SIZE 2048
-
+#define MAX_COMBINED_BUFFER_SIZE 2048
 void saveINMPAndMAXToSDTask(void *parameter) {
     static char combined_buffer[COMBINED_BUFFER_SIZE] = {0};
     static size_t total_len = 0;
     TickType_t lastWriteTime = xTaskGetTickCount();
+    static char max_combined_buffer[MAX_COMBINED_BUFFER_SIZE] = {0};
+    static size_t max_total_len = 0;
+    TickType_t lastMaxWriteTime = xTaskGetTickCount();
+
     while(1) {
         size_t item_size1;
         size_t item_size2;
@@ -586,18 +601,35 @@ void saveINMPAndMAXToSDTask(void *parameter) {
         }
 
         //Receive an item from no-split MAX30102 ring buffer
-        char *item2 = (char *)xRingbufferReceive(buf_handle_max, &item_size2, 1);
-        
-        if (item2 != NULL) {
-            if (xSemaphoreTake(mutex_max, portMAX_DELAY)) {
-                vRingbufferReturnItem(buf_handle_max, (void *)item2);
-                sdcard_writeDataToFile_noArgument(nameFilePPG, item2);
-                xSemaphoreGive(mutex_max);
+        // Nhận dữ liệu từ ring buffer MAX30102
+        char *item2 = (char *)xRingbufferReceive(buf_handle_max, &item_size2, pdMS_TO_TICKS(50));
+
+        if (item2 != NULL && item_size2 > 0) {
+            if (max_total_len + item_size2 < MAX_COMBINED_BUFFER_SIZE) {
+                memcpy(max_combined_buffer + max_total_len, item2, item_size2);
+                max_total_len += item_size2;
+            } else {
+                ESP_LOGW(__func__, "MAX buffer đầy, ghi sớm...");
             }
+
+            vRingbufferReturnItem(buf_handle_max, (void *)item2);
         }
-        // else{
-        //     ESP_LOGE(__func__,"item2 is null");
-        // }
+
+        // Kiểm tra điều kiện ghi MAX
+        now = xTaskGetTickCount();
+        if (max_total_len > 0 && (now - lastMaxWriteTime >= pdMS_TO_TICKS(500) || max_total_len >= 1024)) {
+            esp_err_t err = sdcard_writeDataToFile_noArgument(nameFilePPG, max_combined_buffer);
+            if (err != ESP_OK) {
+                ESP_LOGE(__func__, "Ghi MAX30102 thất bại: %s", esp_err_to_name(err));
+            } else {
+                ESP_LOGI(__func__, "Wrote %d bytes to file MAX30102", max_total_len);
+            }
+
+            max_total_len = 0;
+            memset(max_combined_buffer, 0, sizeof(max_combined_buffer));
+            lastMaxWriteTime = now;
+        }
+
     }
 }
 void sntp_init_func()
@@ -654,7 +686,7 @@ void app_main(void)
     }
 
     // Initialise ring buffers
-    buf_handle_max = xRingbufferCreate(1028 * 6, RINGBUF_TYPE_NOSPLIT);
+    buf_handle_max = xRingbufferCreate(1028 * 10, RINGBUF_TYPE_NOSPLIT);
     buf_handle_inm = xRingbufferCreate(1028 * 15, RINGBUF_TYPE_NOSPLIT);
 
     if(buf_handle_inm == NULL) 
