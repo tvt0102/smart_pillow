@@ -57,11 +57,6 @@ RingbufHandle_t buf_handle_inm;
 static int16_t buffer16[DMA_BUFFER_SIZE / sizeof(int32_t) * 3 / 2] = {0}; //288 samples (576 bytes) de luu duoc 3 bytes sau khi dich cua buffer32
 static int32_t buffer32[DMA_BUFFER_SIZE / sizeof(int32_t)] = {0}; //192 samples (768 bytes)
 
-// Buffers to store data read from dma buffers
-// static int16_t buffer16[receiveBufferLen / 4] = {0};
-// static uint8_t buffer32[receiveBufferLen] = {0};
-//TaskHandle_t readINMP441_handle = NULL;
-
 //Tao kenh rx
 i2s_chan_handle_t rx_channel = NULL; 
 
@@ -487,6 +482,7 @@ static void initialize_nvs(void)
  * 
  * @param pvParameters 
  */
+volatile uint32_t sample_count_inm = 0;
 
 void readINMP441Task(void* parameter) {
     i2s_install(&rx_channel); // Cấu hình kênh I2S sử dụng API mới
@@ -494,16 +490,14 @@ void readINMP441Task(void* parameter) {
 
     TickType_t startTime = xTaskGetTickCount();
     size_t bytesRead;
-    //char data_temp[16] = {0};
     char temp_buffer[768] = {0}; // đủ để lưu 100–150 mẫu
     size_t offset = 0;
-
 
     struct tm timeTemp = {0};
     ds3231_get_time(&ds3231_device, &timeTemp); // Lấy thời gian thực
     memset(nameFilePCG, 0, sizeof(nameFilePCG));
     sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
-
+    TickType_t start_sample = xTaskGetTickCount();
     while (1) {
         vTaskDelay(1); // tránh watchdog reset
 
@@ -517,7 +511,6 @@ void readINMP441Task(void* parameter) {
             ESP_LOGE(__func__, "Lỗi đọc dữ liệu: %s", esp_err_to_name(ret));
             break;
         }
-
         int samplesRead = bytesRead / sizeof(int32_t);
         for (int i = 0; i < samplesRead; i++) {
             int16_t sample = (int16_t)(buffer32[i] >> 8); // Lấy 16-bit có ý nghĩa từ 24-bit gốc
@@ -525,12 +518,14 @@ void readINMP441Task(void* parameter) {
             int len = snprintf(temp_buffer + offset, sizeof(temp_buffer) - offset, "%d\n",buffer16[i]);
             if (len < 0 || len >= (int)(sizeof(temp_buffer) - offset)) break; // tránh tràn
             offset += len;
+            sample_count_inm++;
         }
         // Gửi vào ringbuffer
         if (offset > 0) {
             BaseType_t result = xRingbufferSend(buf_handle_inm, temp_buffer, offset, pdMS_TO_TICKS(100));
             if (result != pdTRUE) {
-                ESP_LOGW(__func__, "Ringbuffer INMP full, mất mẫu.");
+                //ESP_LOGW(__func__, "Ringbuffer INMP full, mất mẫu.");
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
             offset = 0;
             memset(temp_buffer, 0, sizeof(temp_buffer));
@@ -632,6 +627,17 @@ void saveINMPAndMAXToSDTask(void *parameter) {
 
     }
 }
+void monitor_inmp_sample_rate_task(void* param) {
+    while (1) {
+        uint32_t count_before = sample_count_inm;
+        vTaskDelay(pdMS_TO_TICKS(1000));  // đợi 1 giây
+        uint32_t count_after = sample_count_inm;
+        uint32_t samples_in_1s = count_after - count_before;
+
+        ESP_LOGI("SampleRate", "Samples in 1s: %ld", samples_in_1s);
+    }
+}
+
 void sntp_init_func()
 {
     ESP_LOGI(__func__, "Initializing SNTP.");
@@ -734,9 +740,10 @@ void app_main(void)
     ds3231_set_time(&ds3231_device, &timeInfo);
 
     // Create tasks
-    xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 0);
+    //xTaskCreatePinnedToCore(max30102_test, "max30102_test", 1024 * 5,NULL,6, &readMAXTask_handle, 0);
     xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 15, NULL, 12, &readINMTask_handle, 0);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??
     xTaskCreatePinnedToCore(saveINMPAndMAXToSDTask, "saveToSD", 1024 * 10,NULL,  10, &saveToSDTask_handle, 1);
+    xTaskCreate(monitor_inmp_sample_rate_task, "monitor_rate", 2048, NULL, 5, NULL);    
 
     //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);
     //xTaskCreatePinnedToCore(listenFromMQTT, "listenFromMQTT", 1024 * 3,NULL,  5, &listenFromMQTT_handle, 0);
