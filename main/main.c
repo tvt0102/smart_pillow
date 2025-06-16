@@ -420,13 +420,15 @@ void read_max30102_task(void* parameter)
     ds3231_get_time(&ds3231_device, &timeTemp);
     sprintf(nameFilePPG,"%s_%d_%d_%d", "PPG",timeTemp.tm_hour,timeTemp.tm_min,timeTemp.tm_sec);
     ESP_LOGI(__func__, "Get data MAX30102 start file %s\n", nameFilePPG);
+
     while (1)
     {
-        vTaskDelay(10);
+        //vTaskDelay(10);
         uint16_t number_of_newSample = max30102_check(&record, &dev); //Check the sensor, read up to 3 samples
         //ESP_LOGI(__func__, "Number of new samples: %d", number_of_newSample);
         while (max30102_available(&record)) //do we have new data?
         {
+            sampleCount ++;
             red = max30102_getFIFORed(&record);
             ir = max30102_getFIFOIR(&record);
             int len = snprintf(temp_buffer+offset, sizeof(temp_buffer)-offset, "%lu,%lu\n", red, ir);
@@ -450,12 +452,12 @@ void read_max30102_task(void* parameter)
                 // }
                 memset(temp_buffer, 0, sizeof(temp_buffer));
                 offset = 0;
-                vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(1));
             }
             if (sampleCount >= 300) // Check if sampleCount is greater than 500
             { 
                 ESP_LOGI(__func__, "Writing file %s is done", nameFilePPG);
-                vTaskDelay(1000/portTICK_PERIOD_MS);
+                // vTaskDelay(1000/portTICK_PERIOD_MS);
                 //publish_message("message/nameFilePPG", nameFilePPG);
                 memset(nameFilePPG,0,sizeof(nameFilePPG));
                 ds3231_get_time(&ds3231_device, &timeTemp);
@@ -465,8 +467,7 @@ void read_max30102_task(void* parameter)
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
             max30102_nextSample(&record); //We're finished with this sample so move to next sample
-        }   
-        
+        }
         //ESP_LOGI(__func__, "End of MAX30102 while loop");
     }
     //ESP_LOGI(__func__, "End of MAX30102 task");
@@ -499,7 +500,7 @@ void readINMP441Task(void* parameter) {
     //TickType_t startTime = xTaskGetTickCount();
     size_t bytesRead;
     int sampleCount = 0;
-    char temp_buffer[2048] = {0}; // đủ để lưu 100–150 mẫu
+    char temp_buffer[4096] = {0}; // đủ để lưu 585 mẫu
     size_t offset = 0;
 
     struct tm timeTemp = {0};
@@ -508,7 +509,7 @@ void readINMP441Task(void* parameter) {
     sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
     ESP_LOGI(__func__, "Get data INMP441 start file: %s", nameFilePCG);
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1)); // tránh watchdog reset
+        vTaskDelay(pdMS_TO_TICKS(10)); // tránh watchdog reset
         // Đọc dữ liệu từ microphone
         esp_err_t ret = i2s_channel_read(rx_channel, &buffer32, sizeof(buffer32), &bytesRead, 100);
         if (ret == ESP_ERR_TIMEOUT) {
@@ -525,32 +526,25 @@ void readINMP441Task(void* parameter) {
             int16_t sample = (int16_t)(buffer32[i] >> 8); // Lấy 16-bit có ý nghĩa từ 24-bit gốc
             buffer16[i] = sample; 
             int len = snprintf(temp_buffer + offset, sizeof(temp_buffer) - offset, "%d\n",buffer16[i]);
-            if ((offset+len) < 2000){
-                offset += len;
-            } // tránh tràn
-            else {
-                if (xSemaphoreTake(sdcard_write_mutex, portMAX_DELAY) == pdTRUE) { // Lấy semaphore
-                    esp_err_t err = sdcard_writeDataToFile_noArgument(nameFilePCG, temp_buffer);
-                    xSemaphoreGive(sdcard_write_mutex); // Nhả semaphore
-                    if (err != ESP_OK) {
-                        ESP_LOGE(__func__, "Ghi dữ liệu INMP441 vào SD card thất bại: %s", esp_err_to_name(err));
-                    }
-                    // else {
-                    //     ESP_LOGI(__func__, "Ghi dữ liệu INMP441 vào SD card thành công.");
-                    // }
-                }
-                // else {
-                //     ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho INMP441.");
-                // }
-                memset(temp_buffer, 0, sizeof(temp_buffer));
-                offset = 0;
-            }
+            offset += len;
         }
-        
-        // Cập nhật tên file mỗi 15 giây
-        //TickType_t currentTime = xTaskGetTickCount();
-        if (sampleCount >= 1000) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+        if(offset >= sizeof(temp_buffer)) {
+            ESP_LOGI(__func__, "Buffer full, writing data to file...");
+        }
+        if (sampleCount >=550) {
+            if (xSemaphoreTake(sdcard_write_mutex, portMAX_DELAY) == pdTRUE) { // Lấy semaphore
+                esp_err_t err = sdcard_writeDataToFile_noArgument(nameFilePCG, temp_buffer);
+                xSemaphoreGive(sdcard_write_mutex); // Nhả semaphore
+                if (err != ESP_OK) {
+                    ESP_LOGE(__func__, "Ghi dữ liệu INMP441 vào SD card thất bại: %s", esp_err_to_name(err));
+                }
+                else {
+                    ESP_LOGI(__func__, "Ghi dữ liệu INMP441 vào SD card thành công.");
+                }
+            }
+            // else {
+            //     ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho INMP441.");
+            // }
             publish_message("message/nameFilePCG", nameFilePCG);
             ds3231_get_time(&ds3231_device, &timeTemp);
             sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
@@ -558,7 +552,9 @@ void readINMP441Task(void* parameter) {
             vTaskDelay(pdMS_TO_TICKS(10));
             //startTime = currentTime;
             sampleCount = 0;
-        }
+            memset(temp_buffer, 0, sizeof(temp_buffer));
+            offset = 0;
+        } // tránh tràn
     }
 }
 
@@ -620,9 +616,9 @@ void app_main(void)
     // Wait 1 second for memory initialization
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     WIFI_initSTA();
-    // initinal mqtt
+    //initinal mqtt
     mqtt_app_start();
-
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
     ESP_LOGI(__func__, "Set up output control pillow\n");
     gpio_set_direction(2, GPIO_MODE_OUTPUT);    // bom 1
     gpio_set_direction(4, GPIO_MODE_OUTPUT);    // bom 2
@@ -632,7 +628,7 @@ void app_main(void)
     gpio_set_direction(3, GPIO_MODE_OUTPUT);    // xa 2
     gpio_set_direction(1, GPIO_MODE_OUTPUT);   // xa 3
     
-    // update time use sntp
+    //update time use sntp
     time_t timeNow = 0;
     struct tm timeInfo = { 0 };
     sntp_init_func();
@@ -650,8 +646,8 @@ void app_main(void)
     ds3231_set_time(&ds3231_device, &timeInfo);
 
     // Create tasks
-    xTaskCreatePinnedToCore(read_max30102_task, "read_max30102_task", 1024 * 25,NULL, 20, &readMAXTask_handle, 0);
-    //xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 25, NULL, 19, &readINMTask_handle, 1);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??  
+    //xTaskCreatePinnedToCore(read_max30102_task, "read_max30102_task", 1024 * 25,NULL, 20, &readMAXTask_handle, 0);
+    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 25, NULL, 19, &readINMTask_handle, 1);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??  
 
     //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);
     //xTaskCreatePinnedToCore(listenFromMQTT, "listenFromMQTT", 1024 * 3,NULL,  5, &listenFromMQTT_handle, 0);
