@@ -32,8 +32,10 @@
 #include "../component/INMP441/inmp441.h"
 #include "../component/FileManager/sdcard.h"
 #include "max30102.h"
+#include "../component/wavelet/wavelet.h"
 
 /*------------------------------------ DEFINE ------------------------------------ */
+static const char *TAG = "SMART PILLOW";
 //WIFI
 #define WIFI_SSID "Nghe House 2"
 #define WIFI_PASSWORD "@ngoinhavuive"
@@ -47,6 +49,8 @@
 #define CONFIG_RTC_PIN_NUM_SCL 27
 
 //Max30102
+#define SAMPLE_LEN 500
+#define SAMPLE_RATE 200
 #define powerLed      UINT8_C(0x1F) // Cường độ led, tiêu thụ 6.4mA
 #define sampleAverage 4
 #define ledMode       2
@@ -56,6 +60,7 @@
 #define I2C_SDA_GPIO  21
 #define I2C_SCL_GPIO  22
 #define I2C_PORT      I2C_NUM_0
+extern const double rdb4_low_pass_filter[FILTER_SIZE];
 
 //Buffer de luu tru du lieu doc duoc tu buffer DMA
 //Chuyen doi tu byte DMA sang so luong mau cua moi buffer 
@@ -410,7 +415,7 @@ void read_max30102_task(void* parameter)
     }else ESP_LOGI(pcTaskGetName(NULL), "Khoi tao cam bien thanh cong !");
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     
-    char temp_buffer[1024] = {0};
+    char temp_buffer[1450] = {0};
     size_t offset = 0;
     int sampleCount = 0;
     unsigned long red;
@@ -428,7 +433,6 @@ void read_max30102_task(void* parameter)
         //ESP_LOGI(__func__, "Number of new samples: %d", number_of_newSample);
         while (max30102_available(&record)) //do we have new data?
         {
-            sampleCount ++;
             red = max30102_getFIFORed(&record);
             ir = max30102_getFIFOIR(&record);
             int len = snprintf(temp_buffer+offset, sizeof(temp_buffer)-offset, "%lu,%lu\n", red, ir);
@@ -436,30 +440,29 @@ void read_max30102_task(void* parameter)
                 offset += len;
                 sampleCount++;
             } // tránh tràn
-            if((sampleCount % 25) == 0){
+            else {
+                ESP_LOGE(__func__, "Buffer overflow");
+            }
+            if (sampleCount >= 100) // Check if sampleCount is greater than 500
+            { 
                 if (xSemaphoreTake(sdcard_write_mutex, portMAX_DELAY) == pdTRUE) { // Lấy semaphore
                     esp_err_t err = sdcard_writeDataToFile_noArgument(nameFilePPG, temp_buffer);
                     xSemaphoreGive(sdcard_write_mutex); // Nhả semaphore
                     if (err != ESP_OK) {
                         ESP_LOGE(__func__, "Ghi dữ liệu MAX30102 vào SD card thất bại: %s", esp_err_to_name(err));
                     }
-                    // else {
-                    //     ESP_LOGI(__func__, "Ghi dữ liệu MAX30102 vào SD card thành công.");
-                    // }
+                    else {
+                        ESP_LOGI(__func__, "Ghi dữ liệu MAX30102 vào SD card thành công.");
+                    }
                 }
-                //else {
-                //     ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho INMP441.");
-                // }
+                else {
+                    ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho MAX30102.");
+                }
                 memset(temp_buffer, 0, sizeof(temp_buffer));
                 offset = 0;
                 vTaskDelay(pdMS_TO_TICKS(1));
-            }
-            if (sampleCount >= 300) // Check if sampleCount is greater than 500
-            { 
                 ESP_LOGI(__func__, "Writing file %s is done", nameFilePPG);
-                // vTaskDelay(1000/portTICK_PERIOD_MS);
-                //publish_message("message/nameFilePPG", nameFilePPG);
-                memset(nameFilePPG,0,sizeof(nameFilePPG));
+                publish_message("message/nameFilePPG", nameFilePPG);
                 ds3231_get_time(&ds3231_device, &timeTemp);
                 sprintf(nameFilePPG,"%s_%d_%d_%d", "PPG",timeTemp.tm_hour,timeTemp.tm_min,timeTemp.tm_sec); 
                 sampleCount = 0;
@@ -542,18 +545,19 @@ void readINMP441Task(void* parameter) {
                     ESP_LOGI(__func__, "Ghi dữ liệu INMP441 vào SD card thành công.");
                 }
             }
-            // else {
-            //     ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho INMP441.");
-            // }
+            else {
+                ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho INMP441.");
+            }
             publish_message("message/nameFilePCG", nameFilePCG);
             ds3231_get_time(&ds3231_device, &timeTemp);
             sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
             ESP_LOGI(__func__, "Get data INMP441 start file: %s", nameFilePCG);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            //startTime = currentTime;
             sampleCount = 0;
             memset(temp_buffer, 0, sizeof(temp_buffer));
             offset = 0;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            //startTime = currentTime;
+            
         } // tránh tràn
     }
 }
@@ -629,24 +633,24 @@ void app_main(void)
     gpio_set_direction(1, GPIO_MODE_OUTPUT);   // xa 3
     
     //update time use sntp
-    time_t timeNow = 0;
-    struct tm timeInfo = { 0 };
-    sntp_init_func();
-    sntp_setTime(&timeInfo, & timeNow);
-    mktime(&timeInfo);
+    // time_t timeNow = 0;
+    // struct tm timeInfo = { 0 };
+    // sntp_init_func();
+    // sntp_setTime(&timeInfo, & timeNow);
+    // mktime(&timeInfo);
 
     ESP_LOGI(__func__, "Initialize DS3231 module(I2C/Wire%d).", CONFIG_RTC_I2C_PORT);
     ESP_ERROR_CHECK_WITHOUT_ABORT(i2cdev_init());
     memset(&ds3231_device, 0, sizeof(i2c_dev_t));
     ESP_ERROR_CHECK_WITHOUT_ABORT(ds3231_initialize(&ds3231_device, CONFIG_RTC_I2C_PORT, CONFIG_RTC_PIN_NUM_SDA, CONFIG_RTC_PIN_NUM_SCL));
-    timeInfo.tm_sec += 2;
-    timeInfo.tm_mon += 1;
-    timeInfo.tm_year = 2024;
+    // timeInfo.tm_sec += 2;
+    // timeInfo.tm_mon += 1;
+    // timeInfo.tm_year = 2024;
 
-    ds3231_set_time(&ds3231_device, &timeInfo);
+    //ds3231_set_time(&ds3231_device, &timeInfo);
 
     // Create tasks
-    //xTaskCreatePinnedToCore(read_max30102_task, "read_max30102_task", 1024 * 25,NULL, 20, &readMAXTask_handle, 0);
+    xTaskCreatePinnedToCore(read_max30102_task, "read_max30102_task", 1024 * 25,NULL, 20, &readMAXTask_handle, 0);
     xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 25, NULL, 19, &readINMTask_handle, 1);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??  
 
     //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);

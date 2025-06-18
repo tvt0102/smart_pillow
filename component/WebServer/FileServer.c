@@ -172,9 +172,9 @@ esp_err_t download_get_handler(httpd_req_t *req)
     }
 
     /* If name has trailing '/', respond with directory contents */
-    if (filename[strlen(filename) - 1] == '/') {
-        return http_response_dir_html(req, filepath);
-    }
+    // if (filename[strlen(filename) - 1] == '/') {
+    //     return http_response_dir_html(req, filepath);
+    // }
 
     if (stat(filepath, &file_stat) == -1) {
         /* If file not present on SPIFFS check if URI
