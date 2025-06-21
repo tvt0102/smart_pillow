@@ -20,5 +20,6 @@ void upsample(const double *signal, int signal_len, double *upsampled_signal, in
 int find_peaks(const double *signal, int signal_len, int *peaks, int max_peaks, double threshold);
 double calculate_heart_rate(const int *peaks, int peak_count, double sample_rate);
 double calculate_spo2(const double *red_signal, const double *ir_signal, int signal_len);
+double calculate_threshold(double *signal, int signal_len);
 
 #endif // WAVELET_H

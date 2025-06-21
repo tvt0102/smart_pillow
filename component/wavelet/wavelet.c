@@ -163,14 +163,46 @@ double calculate_heart_rate(const int *peaks, int peak_count, double sample_rate
 double calculate_spo2(const double *red_signal, const double *ir_signal, int signal_len) {
     double ac_red = 0.0, ac_ir = 0.0, dc_red = 0.0, dc_ir = 0.0;
 
+    // Tính toán DC (phần không thay đổi) cho cả tín hiệu Red và IR
     for (int i = 0; i < signal_len; i++) {
         dc_red += red_signal[i];
         dc_ir += ir_signal[i];
-        ac_red += fabs(red_signal[i] - dc_red / signal_len);
-        ac_ir += fabs(ir_signal[i] - dc_ir / signal_len);
     }
 
+    dc_red /= signal_len;  // Tính trung bình cho tín hiệu Red
+    dc_ir /= signal_len;   // Tính trung bình cho tín hiệu IR
+
+    // Tính toán AC (biến động tín hiệu) cho tín hiệu Red và IR
+    for (int i = 0; i < signal_len; i++) {
+        ac_red += fabs(red_signal[i] - dc_red);  // Chênh lệch tuyệt đối với DC
+        ac_ir += fabs(ir_signal[i] - dc_ir);     // Chênh lệch tuyệt đối với DC
+    }
+
+    // Tính tỷ lệ R = (AC_red / DC_red) / (AC_ir / DC_ir)
     double ratio = (ac_red / dc_red) / (ac_ir / dc_ir);
-    double spo2 = 110 - 25 * ratio; // Công thức tham khảo, cần điều chỉnh tùy tín hiệu
+
+    // Tính giá trị SpO2 theo công thức
+    double spo2 = 110 - 25 * ratio;
+
     return spo2;
+}
+
+// Hàm tính ngưỡng threshold từ tín hiệu
+double calculate_threshold(double *signal, int signal_len) {
+    double sum = 0.0;
+    double sum_sq = 0.0;
+
+    // Tính tổng các giá trị tín hiệu
+    for (int i = 0; i < signal_len; i++) {
+        sum += signal[i];
+        sum_sq += signal[i] * signal[i];
+    }
+
+    // Tính trung bình và độ lệch chuẩn
+    double mean = sum / signal_len;
+    double variance = (sum_sq / signal_len) - (mean * mean);
+    double std_dev = sqrt(variance);
+
+    // Tính ngưỡng threshold
+    return mean + 2 * std_dev; // Threshold = mean + 2 * std_dev
 }

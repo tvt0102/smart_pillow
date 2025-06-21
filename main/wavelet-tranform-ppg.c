@@ -132,7 +132,7 @@ int find_peaks(const double *signal, int signal_len, int *peaks, int max_peaks, 
         if (signal[i] > threshold && signal[i] > signal[i - 1] && signal[i] > signal[i + 1]) {
             if (peak_count < max_peaks) {
                 peaks[peak_count++] = i;
-                i+=100;
+                i+=80;
             } else {
                 break;
             }
