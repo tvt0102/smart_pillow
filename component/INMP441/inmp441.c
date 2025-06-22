@@ -19,7 +19,7 @@ void i2s_install(i2s_chan_handle_t **rx_channel){
     i2s_std_config_t std_cfg = {
         //Cau hinh clock
         .clk_cfg = {
-            .sample_rate_hz = SAMPLE_RATE, //Tan so lay mau
+            .sample_rate_hz = SAMPLE_RATE_INMP, //Tan so lay mau
             .clk_src = I2S_CLK_SRC_DEFAULT, //Nguon clock mac dinh
             /**
              * @param mclk_multiple cang tang thi do nhieu (jitter) cua CLK va WS cang giam => Do chinh xac du lieu cang cao    

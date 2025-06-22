@@ -8,7 +8,6 @@
 #include <sys/time.h>
 #include <stddef.h>
 #define FILTER_SIZE 8  // Độ dài bộ lọc
-#define SR 500 // Tần số lấy mẫu
 
 void symmetric_padding(const double *input, int length, int pad_size, double *output) ;
 void convolve(const double *signal, int signal_len, const double *filter, int filter_len, double *result);
@@ -21,5 +20,6 @@ int find_peaks(const double *signal, int signal_len, int *peaks, int max_peaks, 
 double calculate_heart_rate(const int *peaks, int peak_count, double sample_rate);
 double calculate_spo2(const double *red_signal, const double *ir_signal, int signal_len);
 double calculate_threshold(double *signal, int signal_len);
+double calculate_breath_rate(const int *peaks, int peak_count, double sample_rate);
 
 #endif // WAVELET_H

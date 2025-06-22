@@ -25,7 +25,7 @@
 #define I2S_SCK_PIN 32
 #define I2S_WS_PIN 25
 #define I2S_SD_PIN 33
-#define SAMPLE_RATE 4000 //Tan so lay mau 4000Hz
+#define SAMPLE_RATE_INMP 8000 //Tan so lay mau 4000Hz
 
 /**
  * @note Sample rate cang cao thi dmaLen cung cang cao de tranh mat mau

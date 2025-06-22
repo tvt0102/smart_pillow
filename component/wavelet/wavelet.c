@@ -149,6 +149,17 @@ double calculate_heart_rate(const int *peaks, int peak_count, double sample_rate
     double rr_mean = rr_intervals_sum / (peak_count - 1);
     return 60.0 / rr_mean; // Nhịp tim tính bằng bpm
 }
+double calculate_breath_rate(const int *peaks, int peak_count, double sample_rate) {
+    if (peak_count < 2) return 0.0;
+
+    double rr_intervals_sum = 0.0;
+    for (int i = 1; i < peak_count; i++) {
+      //  printf("%f\n", (peaks[i] - peaks[i - 1]) / sample_rate);
+        rr_intervals_sum += (peaks[i] - peaks[i - 1]) / sample_rate;
+    }
+    double rr_mean = rr_intervals_sum / (peak_count - 1);
+    return 60.0 / rr_mean; // Nhịp tim tính bằng bpm
+}
 
 // Hàm tính SpO2 (giả định tín hiệu Red và IR đã được tách)
 
@@ -204,5 +215,5 @@ double calculate_threshold(double *signal, int signal_len) {
     double std_dev = sqrt(variance);
 
     // Tính ngưỡng threshold
-    return mean + 2 * std_dev; // Threshold = mean + 2 * std_dev
+    return mean + std_dev; // Threshold = mean + 2 * std_dev
 }
