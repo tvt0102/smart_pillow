@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 int main() {
-    FILE *input_file = fopen("dataMAX.txt", "r");  // Mở file .txt đầu vào
+    FILE *input_file = fopen("PPG_22_30_8.txt", "r");  // Mở file .txt đầu vào
     if (!input_file) {
         perror("Không thể mở file .txt đầu vào");
         return EXIT_FAILURE;

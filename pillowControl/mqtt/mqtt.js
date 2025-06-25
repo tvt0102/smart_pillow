@@ -1,7 +1,7 @@
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require("fs");
-var ip = '192.168.1.21';
+var ip = '192.168.1.31';
 const host = '192.168.1.18';
 const port = 1883;
 const clientId = `mqtt_${Math.random().toString(16).slice(3)}`
@@ -18,16 +18,16 @@ var nameFilePCG = '';
 var nameFilePPG = '';
 function callAPIPCG() {
     return Promise.all([
-        axios.get(`http://${ip}/${nameFilePCG}.txt`)
+        axios.get(`http://${ip}/${nameFilePCG}.bin`,{ responseType: 'arraybuffer' })
         .then(response => {
-            fs.writeFile("./uploads/testINMP.txt",response.data, (err)=>{
+            fs.writeFile("./uploads/dataINMP.bin",Buffer.from(response.data), (err)=>{
                 if (err) {
                     console.error('Lỗi khi ghi file:', err);
                 } else {  
-                    console.log('Dữ liệu đã được lưu vào file testINMP.txt');
+                    console.log('Dữ liệu đã được lưu vào file dataINMP.bin');
                 }
             })
-            fs.appendFile("./uploads/dataINMP.txt", response.data, (err) => {
+            fs.appendFileFile("./uploads/data_all_INMP.bin", Buffer.from(response.data), (err) => {
                 if (err) {
                 console.error('Lỗi khi ghi file:', err);
                 } else {
@@ -38,7 +38,7 @@ function callAPIPCG() {
         .catch(error => {
             console.error(error);
         }),
-        axios.post(`http://${ip}/delete/${nameFilePCG}.txt`, "")
+        axios.post(`http://${ip}/delete/${nameFilePCG}.bin`, "")
         .then(response => {
             console.log('Đã xóa dữ liệu INMP thành công:');
         })
@@ -48,38 +48,38 @@ function callAPIPCG() {
         
     ]);
   }   
-  function callAPIPPG() {
-    return Promise.all([
-        axios.get(`http://${ip}/${nameFilePPG}.txt`)
-        .then(response => {
-            fs.writeFile("./uploads/testMAX.txt",response.data, (err)=>{
-                if (err) {
-                    console.error('Lỗi khi ghi file:', err);
-                } else {  
-                    console.log('Dữ liệu đã được lưu vào file testMAX.txt');
-                }
-            })
-            fs.appendFile("./uploads/dataMAX.txt", response.data, (err) => {
-                if (err) {
-                console.error('Lỗi khi ghi file:', err);
-                } else {
-                console.log('Dữ liệu đã được thêm vào file dataMAX.txt');
-                }
-            });
-        })
-        .catch(error => {
-            console.error(error);
-        }),
-        axios.post(`http://${ip}/delete/${nameFilePPG}.txt`, "")
-        .then(response => {
-            console.log('Đã xóa dữ liệu MAX thành công:');
-        })
-        .catch(error => {
-            console.error('Lỗi khi gửi dữ liệu:');
-        })
+//   function callAPIPPG() {
+//     return Promise.all([
+//         axios.get(`http://${ip}/${nameFilePPG}.txt`)
+//         .then(response => {
+//             fs.writeFile("./uploads/testMAX.txt",response.data, (err)=>{
+//                 if (err) {
+//                     console.error('Lỗi khi ghi file:', err);
+//                 } else {  
+//                     console.log('Dữ liệu đã được lưu vào file testMAX.txt');
+//                 }
+//             })
+//             fs.appendFile("./uploads/dataMAX.txt", response.data, (err) => {
+//                 if (err) {
+//                 console.error('Lỗi khi ghi file:', err);
+//                 } else {
+//                 console.log('Dữ liệu đã được thêm vào file dataMAX.txt');
+//                 }
+//             });
+//         })
+//         .catch(error => {
+//             console.error(error);
+//         }),
+//         axios.post(`http://${ip}/delete/${nameFilePPG}.txt`, "")
+//         .then(response => {
+//             console.log('Đã xóa dữ liệu MAX thành công:');
+//         })
+//         .catch(error => {
+//             console.error('Lỗi khi gửi dữ liệu:');
+//         })
         
-    ]);
-  }   
+//     ]);
+//   }   
 
 
 async function measureTimePCG(){
@@ -94,16 +94,16 @@ async function measureTimePCG(){
     client.publish("message/fileAck", JSON.stringify({ file_ack: nameFilePCG }));
 }
 
-async function measureTimePPG(){
-    let startTime = Date.now();
-    startTime = startTime / 1000;    //time s
-    await callAPIPPG();
-    let endTime = Date.now();
-    endTime = endTime / 1000;   
+// async function measureTimePPG(){
+//     let startTime = Date.now();
+//     startTime = startTime / 1000;    //time s
+//     await callAPIPPG();
+//     let endTime = Date.now();
+//     endTime = endTime / 1000;   
 
-    console.log("Time run API of MAX: ",endTime - startTime);
-
-}
+//     console.log("Time run API of MAX: ",endTime - startTime);
+//     client.publish("message/fileAck", JSON.stringify({ file_ack: nameFilePPG }));
+// }
 
 
 client.on('connect', () => {
@@ -119,14 +119,14 @@ client.on('message',async function (topic, message) {
         nameFilePCG = message.namefile;
         measureTimePCG();
     }
-    else{
-        nameFilePPG = message.namefile;
-        measureTimePPG();
-    }
+    // else{
+    //     nameFilePPG = message.namefile;
+    //     measureTimePPG();
+    // }
     // nameFilePCG  = message.namefile;
     // console.log(nameFilePCG);
     //measureTimePCG(); 
 });
 
 client.subscribe(topicPCG);
-client.subscribe(topicPPG);
+//client.subscribe(topicPPG);

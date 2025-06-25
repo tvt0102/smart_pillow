@@ -32,7 +32,7 @@ def plot_signals(ir_signal, red_signal):
     plt.show()
 
 # Đường dẫn tới file dữ liệu
-file_path = 'dataMAX.txt'  # Đổi tên file nếu cần
+file_path = 'PPG_22_30_8.txt'  # Đổi tên file nếu cần
 
 # Đọc dữ liệu từ file và vẽ đồ thị
 ir_signal, red_signal = read_data(file_path)

@@ -51,7 +51,7 @@ double calculate_threshold(double mean, double std_dev) {
 
 int main() {
     double signal[MAX_SIZE];
-    const char *filename = "dataMAX.txt";  // Đường dẫn tới file .txt của bạn
+    const char *filename = "PPG_22_30_8.txt";  // Đường dẫn tới file .txt của bạn
 
     int size = read_data_from_txt(filename, signal);  // Đọc dữ liệu từ file
     if (size == -1) {

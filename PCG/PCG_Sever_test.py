@@ -57,6 +57,13 @@ def read_txt_file(filename):
             # Đọc từng giá trị mẫu tín hiệu từ file .txt
             signal.append(float(line.strip()))
     return np.array(signal)
+# Hàm đọc dữ liệu từ file .bin (2 byte cho mỗi mẫu)
+def read_bin_file(filename):
+    signal = []
+    with open(filename, 'rb') as f:  # Mở file nhị phân
+        while byte := f.read(2):  # Đọc mỗi 2 byte (1 mẫu)
+            signal.append(int.from_bytes(byte, byteorder='little', signed=True))  # Chuyển 2 byte thành 1 mẫu int16
+    return np.array(signal)
 
 # Hàm chuyển đổi tín hiệu thành file .wav
 def save_as_wav(signal, filename, sample_rate=SR):
@@ -99,7 +106,7 @@ def calculate_std_dev(signal, mean):
 
 # Hàm tính ngưỡng threshold
 def calculate_threshold(mean, std_dev):
-    return mean + 3*std_dev  # Ngưỡng threshold = mean + std_dev
+    return mean + 2*std_dev  # Ngưỡng threshold = mean + std_dev
 
 # Hàm tìm đỉnh tín hiệu
 def find_peaks(signal, threshold, min_distance = 8000):
@@ -205,7 +212,7 @@ def calculate_breath_rate(peaks, sample_rate):
     breath_intervals = []  # Khởi tạo danh sách để lưu trữ thời gian giữa các lần thở
 
     for i in range(1, len(peaks)):
-        interval = (peaks[i] - peaks[i-1]) / sample_rate + 0.88  # Tính khoảng cách thời gian giữa hai lần thở
+        interval = (peaks[i] - peaks[i-1]) / sample_rate + 0.8   # Tính khoảng cách thời gian giữa hai lần thở
         print(f"Thời gian giữa 2 lần thở {i} và {i+1}: {interval:.4f} giây")
         breath_intervals.append(interval)  # Lưu lại khoảng thời gian giữa các lần thở
 
@@ -227,79 +234,51 @@ def plot_wavelet_levels(coeffs):
 
     plt.tight_layout()
     plt.show()
-
 # === MAIN ===
 # Đọc tín hiệu từ file .txt
-while True:
-        try:
-            txt_filename = "PCG_22_18_02.txt"  # Đặt tên file .txt chứa dữ liệu tín hiệu
-            txt_signal = read_txt_file(txt_filename)
-                
-            # Lưu tín hiệu thành file .wav
-            save_as_wav(txt_signal, "dataINMP.wav", sample_rate=SR)
-            filename = "dataINMP.wav"
-            signal, sample_rate = read_audio_file(filename)
+#D:/ESP/Espressif/frameworks/pillowControl/mqtt/uploads/
+bin_filename = "dataINMP.bin"  # Đặt tên file .bin chứa dữ liệu tín hiệu
+bin_signal = read_bin_file(bin_filename)
+    
+# Lưu tín hiệu thành file .wav
+save_as_wav(bin_signal, "dataINMP.wav", sample_rate=SR)
+filename = "dataINMP.wav" 
+signal, sample_rate = read_audio_file(filename)
 
-            # Lọc tín hiệu IR với bộ lọc bandpass (0.5 Hz - 50 Hz)
-            filtered_signal = bandpass_filter(signal, lowcut=20, highcut=1000, sample_rate=SR)
-            plot_before_after_filter(signal, filtered_signal)
-            # Phân tích 3 cấp bằng wavelet
-            coeffs = pywt.wavedec(filtered_signal, 'db4', level=3)
+# Lọc tín hiệu IR với bộ lọc bandpass (0.5 Hz - 50 Hz)
+filtered_signal = bandpass_filter(signal, lowcut=20, highcut=1000, sample_rate=SR)
+plot_before_after_filter(signal, filtered_signal)
+# Phân tích 3 cấp bằng wavelet
+coeffs = pywt.wavedec(filtered_signal, 'db4', level=3)
 
-            # Vẽ các cấp độ wavelet
-            plot_wavelet_levels(coeffs)
+# Vẽ các cấp độ wavelet
+plot_wavelet_levels(coeffs)
 
-            # Khôi phục lại tín hiệu (giữ lại cả approximation và detail)
-            cA = coeffs[0]
-            cD = coeffs[1:]
-            restored_signal = restore_signal(cA)
+# Khôi phục lại tín hiệu (giữ lại cả approximation và detail)
+cA = coeffs[0]
+cD = coeffs[1:]
+restored_signal = restore_signal(cA)
 
-            # Tính threshold từ tín hiệu phục hồi
-            mean = calculate_mean(restored_signal)
-            std_dev = calculate_std_dev(restored_signal, mean)
-            threshold = calculate_threshold(mean, std_dev)
+# Tính threshold từ tín hiệu phục hồi
+mean = calculate_mean(restored_signal)
+std_dev = calculate_std_dev(restored_signal, mean)
+threshold = calculate_threshold(mean, std_dev)
 
-            # Tìm đỉnh & nhịp tim
-            peaks = find_peaks(restored_signal, threshold)
-            breath_rate = calculate_breath_rate(peaks, SR)
+# Tìm đỉnh & nhịp tim
+peaks = find_peaks(restored_signal, threshold)
+breath_rate = calculate_breath_rate(peaks, SR)
 
-            # In kết quả
-            print(f"Ngưỡng threshold: {threshold:.2f}")
-            print(f"Số lượng đỉnh: {len(peaks)}")
-            print(f"Nhịp thở: {breath_rate:.2f} nhịp/phút")
-            for i, p in enumerate(peaks):
-                print(f"Đỉnh {i+1} tại vị trí {p}")
+# In kết quả
+print(f"Ngưỡng threshold: {threshold:.2f}")
+print(f"Số lượng đỉnh: {len(peaks)}")
+print(f"Nhịp thở: {breath_rate:.2f} nhịp/phút")
+for i, p in enumerate(peaks):
+    print(f"Đỉnh {i+1} tại vị trí {p}")
 
-            # Kiểm tra bất thường về nhịp thở và gửi MQTT
-            abnormal = False
+# Vẽ tín hiệu với các đỉnh
+plot_signal_with_peaks(restored_signal, peaks)
 
-            # Kiểm tra khoảng cách giữa các đỉnh thở
-            for i in range(1, len(peaks)):
-                interval = (peaks[i] - peaks[i - 1]) / SR
-                if interval > 10:  # hơn 10 giây
-                    abnormal = True
-                    print(f"Khoảng cách giữa lần thở {i} và {i+1} vượt quá 10 giây: {interval:.2f}s")
-                    break
+# Vẽ tín hiệu trước và sau khi biến đổi wavelet
+plot_before_after_wavelet(filtered_signal, restored_signal)
 
-            # Kiểm tra nhịp thở bất thường
-            if breath_rate < 15 or breath_rate > 40:
-                abnormal = True
-                print(f"hịp thở bất thường: {breath_rate:.2f} lần/phút")
-
-            # Gửi tín hiệu điều khiển qua MQTT
-            if abnormal:
-                send_status(1)
-            else:
-                send_status(0) 
-
-            # Vẽ tín hiệu trước và sau khi biến đổi wavelet
-            plot_before_after_wavelet(filtered_signal, restored_signal)
-
-            # Vẽ tín hiệu với các đỉnh
-            plot_signal_with_peaks(restored_signal, peaks)
-            
-            time.sleep(5)
-
-        except Exception as e:
-            print("Lỗi xảy ra:", e)
-            time.sleep(5)
+   

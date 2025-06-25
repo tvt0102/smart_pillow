@@ -267,7 +267,7 @@ int main() {
     }
 
     // tìm đỉnh tín hiệu
-    peak_count = find_peaks(ucA1, signal_len, peaks, signal_len, 113019.20); // Ngưỡng tùy chỉnh
+    peak_count = find_peaks(ucA1, signal_len, peaks, signal_len, 110338.68); // Ngưỡng tùy chỉnh
     printf("Nhip tim: %.4fBPM\n", calculate_heart_rate(peaks,peak_count,SR));
     printf("So luong dinh: %d\n", peak_count);
     for (int i = 0; i < peak_count; i++) {
