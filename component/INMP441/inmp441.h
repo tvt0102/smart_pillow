@@ -25,7 +25,7 @@
 #define I2S_SCK_PIN 32
 #define I2S_WS_PIN 25
 #define I2S_SD_PIN 33
-#define SAMPLE_RATE_INMP 8000 //Tan so lay mau 4000Hz
+#define SAMPLE_RATE_INMP 8000 //Tan so lay mau 8000Hz
 
 /**
  * @note Sample rate cang cao thi dmaLen cung cang cao de tranh mat mau
@@ -34,8 +34,8 @@
  * @param dmaDesc So bo dac ta DMA, moi bo co the luu tru so byte = dmaLen 
  */
 #define dmaDesc 6 //Bo dac ta DMA
-#define dmaLen 128 //So bytes cua moi buffer
-#define DMA_BUFFER_SIZE (dmaLen * dmaDesc) //So bytes cua buffer DMA cung cap cho = 768　       
+#define dmaLen 512 //So bytes cua moi buffer
+#define DMA_BUFFER_SIZE (dmaLen * dmaDesc) //So bytes cua buffer DMA cung cap cho = 3072　       
 
 //Cau hinh i2s std (I2S_std)
 void i2s_install(i2s_chan_handle_t **rx_channel);

@@ -102,7 +102,7 @@ esp_err_t sdcard_writeDataToFile(const char *nameFile, const char *format, ...);
  * @retval  - ESP_ERROR_SD_READ_DATA_FAILED on fail to read data.
  */
 esp_err_t sdcard_readDataFromFile(const char *nameFile, const char *format, ...);
-
+esp_err_t sdcard_readBinaryDataFromFile(const char *nameFile, uint8_t *buffer, size_t bufferSize);
 /**
  * @brief Write an array of char to SD card (no argument or format) using fwrite function
  * @param nameFile Name of file
@@ -116,7 +116,8 @@ esp_err_t sdcard_readDataFromFile(const char *nameFile, const char *format, ...)
  * @retval  - ESP_ERROR_SD_WRITE_DATA_FAILED on fail to read data.
 */
 esp_err_t sdcard_writeDataToFile_noArgument(const char *nameFile, const char *data);
-
+esp_err_t sdcard_writeBinaryDataToFile(const char *nameFile, const int16_t *data, size_t dataSize);
+esp_err_t sdcard_write_32bit_DataToFile(const char *nameFile, const unsigned long *data, size_t dataSize);
 
 /**
  * @brief Initializes SD card and SPI bus

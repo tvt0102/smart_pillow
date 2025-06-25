@@ -238,4 +238,84 @@ esp_err_t sdcard_deinitialize(const char* _mount_point, sdmmc_card_t *_sdcard, s
     return ESP_OK;
 }
 
+esp_err_t sdcard_writeBinaryDataToFile(const char *nameFile, const int16_t *data, size_t dataSize)
+{
+    char pathFile[64];
+    sprintf(pathFile, "%s/%s.bin", mount_point, nameFile);
+
+    //ESP_LOGI(__func__, "Opening file %s for writing...", pathFile);
+    FILE *file = fopen(pathFile, "ab");
+    if (file == NULL)
+    {
+        ESP_LOGE(__func__, "Failed to open file for writing.");
+        return ESP_ERROR_SD_OPEN_FILE_FAILED;
+    }
+
+    size_t bytesWritten = fwrite(data, 2, dataSize, file);
+    if (bytesWritten < dataSize)
+    {
+        ESP_LOGE(__func__, "Failed to write all data to file %s.", pathFile);
+        fclose(file);
+        return ESP_ERROR_SD_WRITE_DATA_FAILED;
+    }
+
+    //ESP_LOGI(__func__, "Successfully wrote %zu bytes to file %s.", bytesWritten, pathFile);
+    fclose(file);
+    return ESP_OK;
+}
+esp_err_t sdcard_write_32bit_DataToFile(const char *nameFile, const unsigned long *data, size_t dataSize)
+{
+    char pathFile[64];
+    sprintf(pathFile, "%s/%s.bin", mount_point, nameFile);
+
+    //ESP_LOGI(__func__, "Opening file %s for writing...", pathFile);
+    FILE *file = fopen(pathFile, "ab");
+    if (file == NULL)
+    {
+        ESP_LOGE(__func__, "Failed to open file for writing.");
+        return ESP_ERROR_SD_OPEN_FILE_FAILED;
+    }
+
+    size_t bytesWritten = fwrite(data, 4, dataSize, file);
+    if (bytesWritten < dataSize)
+    {
+        ESP_LOGE(__func__, "Failed to write all data to file %s.", pathFile);
+        fclose(file);
+        return ESP_ERROR_SD_WRITE_DATA_FAILED;
+    }
+
+    //ESP_LOGI(__func__, "Successfully wrote %zu bytes to file %s.", bytesWritten, pathFile);
+    fclose(file);
+    return ESP_OK;
+}
+esp_err_t sdcard_readBinaryDataFromFile(const char *nameFile, uint8_t *buffer, size_t bufferSize)
+{
+    char pathFile[64];
+    sprintf(pathFile, "%s/%s.bin", mount_point, nameFile);
+
+    ESP_LOGI(__func__, "Opening file %s...", pathFile);
+    FILE *file = fopen(pathFile, "rb");
+    if (file == NULL)
+    {
+        ESP_LOGE(__func__, "Failed to open file for reading.");
+        return ESP_ERROR_SD_OPEN_FILE_FAILED;
+    }
+
+    size_t bytesRead = fread(buffer, 1, bufferSize, file);
+    if (bytesRead < bufferSize)
+    {
+        if (feof(file)) {
+            ESP_LOGI(__func__, "End of file reached. Total bytes read: %zu", bytesRead);
+        } else {
+            ESP_LOGE(__func__, "Failed to read the expected amount of data from file %s.", pathFile);
+            fclose(file);
+            return ESP_ERROR_SD_READ_DATA_FAILED;
+        }
+    }
+
+    fclose(file);
+    return ESP_OK;
+}
+
+
 
