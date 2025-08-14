@@ -1,5 +1,5 @@
 set(app_src FileServer.c)
-set(pre_req vfs fatfs esp_http_server)
+set(pre_req vfs fatfs esp_http_server spiffs)
 idf_component_register(SRCS ${app_src}
                     INCLUDE_DIRS "."
                     REQUIRES esp_http_server

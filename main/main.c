@@ -1,736 +1,290 @@
-/**
- * @file main.c
- * @brief Main file for SmartPillow
- * @version 2.0
- * @copyright Copyright (c) 2025
- */
-
- /*------------------------------------ INCLUDE LIBRARY ------------------------------------ */
-
 #include <stdio.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <string.h>
-#include <esp_vfs_fat.h>
-#include <esp_log.h>
-#include <esp_vfs.h>
-#include <freertos/semphr.h>
-#include <inttypes.h>
-
-#include "mqtt_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
-#include "cJSON.h"
-#include "esp_sntp.h"
+#include "driver/gptimer.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
-#include "driver/i2c.h"
+#include "lwip/sockets.h"
+#include "FileServer.h"
 
-#include "../component/DS3231/ds3231.h"
-#include "../component/Time/DS3231Time.h"
-#include "../component/WebServer/FileServer.h" 
-#include "../component/INMP441/inmp441.h"
-#include "../component/FileManager/sdcard.h"
-#include "max30102.h"
-#include "../component/wavelet/wavelet.h"
+// Pin TX
+#define PIN_TX1 GPIO_NUM_26
+#define PIN_TX2 GPIO_NUM_27
 
-/*------------------------------------ DEFINE ------------------------------------ */
-static const char *TAG = "SMART PILLOW";
-//WIFI
-#define WIFI_SSID "Nghe House 2"
-#define WIFI_PASSWORD "@ngoinhavuive"
+// Thời gian us
+#define START_LOW   80
+#define START_HIGH  24
+#define BIT1_LOW    32
+#define BIT1_HIGH   16
+#define BIT0_LOW    16
+#define BIT0_HIGH   16
 
-//MQTT
-#define MQTT_BROKER_URL  "mqtt://192.168.1.32:1883"
+// Mode
+#define MODE_DIEU_KHIEN   0b1101000110100001
+#define MODE_TEST_LED     0b1111100010100001
+#define MODE_DIM_LED      0b1100010110100001
+#define DIM_FIXED         0b0000111100000001
+#define DIM_EXTRA8        0b01100100
 
-// RTC
-#define CONFIG_RTC_I2C_PORT 0
-#define CONFIG_RTC_PIN_NUM_SDA 26
-#define CONFIG_RTC_PIN_NUM_SCL 27
+#define FRAME_INTERVAL_MS 8 // ms
 
-//Max30102
-#define SAMPLE_LEN 800
-#define SAMPLE_RATE 200
-#define powerLed      UINT8_C(0x1F) // Cường độ led, tiêu thụ 6.4mA
-#define sampleAverage 1
-#define ledMode       2
-#define sampleRate    200 // Tần số lấy mẫu cao thì kích thước BUFFER_SIZE cũng phải thay đổi để có thời gian thuật toán xử lý các mẫu
-#define pulseWidth    118 // Xung càng rộng, dải thu được càng nhiều (18 bit)
-#define adcRange      4096 // 14 bit ADC tiêu thụ 65.2pA mỗi LSB
-#define I2C_SDA_GPIO  21
-#define I2C_SCL_GPIO  22
-#define I2C_PORT      I2C_NUM_0
-extern const double rdb4_low_pass_filter[FILTER_SIZE];
+#define PIN_SENSOR GPIO_NUM_14
 
-//INMP441
-#define SAMPLE_LEN_INMP 23040
+volatile bool receiving_sequence = false;
+volatile uint64_t seq_start_time_us = 0;
+volatile uint64_t last_frame_time_us = 0;
 
-#define MQTT_CONNECTED_NOTIFY_BIT BIT1
+// ====== Biến toàn cục điều khiển ======
+bool testMode = false;
+uint32_t led_level = 0xFFFFFFF0;
+uint8_t pwm_value = 100;
+uint8_t led_steps = 0;
+uint16_t step_delay_ms = 500; // 0.5 giây
+int frameCountInPhase = 0;
+uint8_t effect_steps = 0;
+volatile bool run_effect_flag = false;
+volatile bool update_steps_flag = false;
 
-//Buffer de luu tru du lieu doc duoc tu buffer DMA
-//Chuyen doi tu byte DMA sang so luong mau cua moi buffer 
-static int32_t buffer32[DMA_BUFFER_SIZE / sizeof(int32_t)] = {0}; //768 samples (3072 bytes)
+// GPTimer handle
+static gptimer_handle_t gptimer = NULL;
+static volatile bool timer_done = false;
 
-//Tao kenh rx
-i2s_chan_handle_t rx_channel = NULL; 
+SemaphoreHandle_t led_mutex = NULL;
 
-TaskHandle_t readMAXTask_handle = NULL;
-TaskHandle_t readINMTask_handle = NULL;
-TaskHandle_t controlPillow_handle = NULL;
-
-SemaphoreHandle_t sdcard_write_mutex;
-SemaphoreHandle_t file_inmp_downloaded_semaphore;
-
-i2c_dev_t ds3231_device;
-
-// namefile save into sd card
-char nameFilePCG[15];
-char nameFilePPG[15];
-
-esp_mqtt_client_handle_t client;
-
-enum functionControl {
-    top,
-    left,
-    right,
-    bottom
-};
-int indexControl = -1;
-int LOW = 0;
-
-int s_retry_num = 0;
-int status;  // variable to save status message from MQTT to control pillow
-char str[30];  // variable to save message
-bool check = false;
-
-void controlPillow(void* parameter){
-    ESP_LOGI(__func__, "Status to control pillow: %d\n", status);
-    //gpio_pad_select_gpio(2);
-    //config maybom1 - 2// may2 -4 // may3-16 // thoatkhi1 - 17 / thoatkhi2 - 3 / thoatkhi3 - 1
-
-    while(true){
-        if(status == 0){
-            break;
-        }
-        indexControl++;
-        indexControl = indexControl % 4;
-        //ESP_LOGI(__func__, "Top: %d %d\n", indexControl, top);
-        if(indexControl == top){
-            ESP_LOGI(__func__, "Status to control top\n");
-            gpio_set_level(2, status); // control may bom 1
-            gpio_set_level(4, status); // control may bom 2
-            gpio_set_level(16, status); // control may bom 3
-            vTaskDelay(5000 / portTICK_PERIOD_MS);
-            gpio_set_level(2, LOW); // stop may bom 1
-            gpio_set_level(4, LOW); // stop may bom 2
-            vTaskDelay(10000 / portTICK_PERIOD_MS);
-            gpio_set_level(16, LOW); // stop may bom 3
-            break;
-                
-        } 
-        if(indexControl == left){
-            ESP_LOGI(__func__, "Status to control left\n");
-            gpio_set_level(2, status); // bom 1
-            gpio_set_level(3, status); // xa van 2
-            vTaskDelay(5000 / portTICK_PERIOD_MS);
-            gpio_set_level(2, LOW); 
-            gpio_set_level(3, LOW); 
-            break;
-                
-        } 
-        if(indexControl == right){
-            ESP_LOGI(__func__, "Status to control right\n");
-            gpio_set_level(17, status); // xa van 1
-            gpio_set_level(4, status); // bom 2
-            vTaskDelay(10000 / portTICK_PERIOD_MS);
-            gpio_set_level(17, LOW); 
-            gpio_set_level(4, LOW); 
-            break;
-                
-        } 
-        if(indexControl == bottom){
-            ESP_LOGI(__func__, "Status to control bottom\n");
-            gpio_set_level(3, status); // xa van 2
-            gpio_set_level(1, status); // xa van 3
-            vTaskDelay(15000 / portTICK_PERIOD_MS);
-            gpio_set_level(3, LOW); 
-            gpio_set_level(1, LOW); 
-            break;
-                
-        } 
-        
-    }
-    
-    // while(left == indexControl && status == 1){
-    //     ESP_LOGI(__func__, "Status to control left\n");
-    //     TickType_t startTime = xTaskGetTickCount();
-    //     gpio_set_level(2, status); //  bom 1
-    //     gpio_set_level(8, status); //  open van 2
-    //     TickType_t endTime = xTaskGetTickCount();
-            
-    //     if(endTime - startTime >= 5000){
-    //         gpio_set_level(2, 0); // stop may bom 1
-    //         gpio_set_level(8, 0); // close van 2
-    //         break;
-    //     }
-    // }
-    // while(right == indexControl && status == 1){
-    //     ESP_LOGI(__func__, "Status to control right\n");
-    //     TickType_t startTime = xTaskGetTickCount();
-    //     gpio_set_level(5, status); // open van 1
-    //     gpio_set_level(4, status); // bom 2
-    //     TickType_t endTime = xTaskGetTickCount();
-            
-    //     if(endTime - startTime >= 10000){
-    //         gpio_set_level(5, 0); // close van 1
-    //         gpio_set_level(4, 0); // stop may bom 2
-    //         break;
-    //     }
-    // }
-    // while(bottom == indexControl && status == 1){
-    //     ESP_LOGI(__func__, "Status to control bottom\n");
-    //     TickType_t startTime = xTaskGetTickCount();
-    //     gpio_set_level(5, status); // open 1
-    //     gpio_set_level(18, status); // open 2
-    //     gpio_set_level(19, status); // open 3
-    //     TickType_t endTime = xTaskGetTickCount();
-            
-    //     if(endTime - startTime >= 15000){
-    //         gpio_set_level(5, status); // close 1
-    //         gpio_set_level(18, status); // close 2
-    //         gpio_set_level(19, status); // close 3
-    //     }
-    
-    // }
-    
-    vTaskDelete(NULL);    
-    
+// ====== GPTimer callback ======
+static bool IRAM_ATTR timer_callback(gptimer_handle_t timer,
+                                     const gptimer_alarm_event_data_t *edata,
+                                     void *user_data) {
+    timer_done = true;
+    return false;
 }
 
-
-/*------------------------------------ MQTT ------------------------------------ */
-
-static void log_error_if_nonzero(const char * message, int error_code)
-{
-    if (error_code != 0) {
-        ESP_LOGE(__func__, "Last error %s: 0x%x", message, error_code);
-    }
-}
-
-static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
-{
-    client = event->client;
-    int msg_id;
-    int msg_id_1;
-    // your_context_t *context = event->context;
-    switch (event->event_id) {
-        case MQTT_EVENT_CONNECTED:
-            ESP_LOGI(__func__, "MQTT_EVENT_CONNECTED");
-            xTaskNotify(readINMTask_handle, MQTT_CONNECTED_NOTIFY_BIT, eSetBits);
-            msg_id = esp_mqtt_client_subscribe(client, "pillow/control", 1);
-            msg_id_1 = esp_mqtt_client_subscribe(client, "message/fileAck", 1);
-            break;
-        case MQTT_EVENT_DISCONNECTED:
-            ESP_LOGI(__func__, "MQTT_EVENT_DISCONNECTED");
-            break;
-
-        // case MQTT_EVENT_SUBSCRIBED:
-        //     ESP_LOGI(__func__, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        //     msg_id = esp_mqtt_client_subscribe(client, "pillow/control", 1);
-        //     // ESP_LOGI(__func__, "sent publish successful, msg_id=%d", msg_id);
-        //     break;
-        // case MQTT_EVENT_UNSUBSCRIBED:
-        //     ESP_LOGI(__func__, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
-        //     break;
-        // case MQTT_EVENT_PUBLISHED:
-        //     ESP_LOGI(__func__, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
-        //     break;
-        case MQTT_EVENT_DATA:
-            ESP_LOGI(__func__, "MQTT_EVENT_DATA");
-            printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-            printf("DATA=%.*s\r\n", event->data_len, event->data);
-
-            cJSON *json = cJSON_Parse(event->data);
-            if (json != NULL) {
-                // Xử lý bản tin xác nhận tải file
-                cJSON *file_ack = cJSON_GetObjectItem(json, "file_ack");
-                if (file_ack && strcmp(file_ack->valuestring, nameFilePCG) == 0) {
-                    ESP_LOGI(__func__, "Đã nhận xác nhận từ server tải file: %s", file_ack->valuestring);
-                    xSemaphoreGive(file_inmp_downloaded_semaphore);
-                }
-
-                // Xử lý điều khiển gối
-                cJSON *status_json = cJSON_GetObjectItem(json, "status");
-                if (status_json && cJSON_IsNumber(status_json)) {
-                    status = status_json->valueint;
-                    ESP_LOGI(__func__, "Status từ MQTT để điều khiển gối: %d", status);
-                    xTaskCreatePinnedToCore(controlPillow, "controlPillow", 1024 * 5, NULL, 15, &controlPillow_handle, 0);
-                }
-
-                cJSON_Delete(json);
-            } else {
-                ESP_LOGW(__func__, "Không phải chuỗi JSON hợp lệ");
-            }
-
-            break;
-
-        case MQTT_EVENT_ERROR:
-            ESP_LOGI(__func__, "MQTT_EVENT_ERROR");
-            if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
-                log_error_if_nonzero("reported from esp-tls", event->error_handle->esp_tls_last_esp_err);
-                log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
-                log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
-                ESP_LOGI(__func__, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
-
-            }
-            break;
-        default:
-            ESP_LOGI(__func__, "Other event id:%d", event->event_id);
-            break;
-    }
-    return ESP_OK;
-}
-
-static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
-    ESP_LOGD(__func__, "Event dispatched from event loop base=%s, event_id=%ld", base, event_id);
-    mqtt_event_handler_cb(event_data);
-}
-
-static void mqtt_app_start(void)
-{
-    esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URL,
+// ====== Khởi tạo GPTimer ======
+static void timer_init_us(void) {
+    gptimer_config_t config = {
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+        .direction = GPTIMER_COUNT_UP,
+        .resolution_hz = 1000000 // 1 tick = 1 µs  
     };
+    gptimer_new_timer(&config, &gptimer);
 
-    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
-    esp_mqtt_client_start(client);
+    gptimer_event_callbacks_t cbs = {
+        .on_alarm = timer_callback
+    };
+    gptimer_register_event_callbacks(gptimer, &cbs, NULL);
+
+    gptimer_enable(gptimer);
 }
 
-/*------------------------------------ WIFI ------------------------------------ */
-static void event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < 10) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(__func__, "retry to connect to the AP");
-        }
-        ESP_LOGI(__func__,"connect to the AP fail");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {      
-        //mqtt_app_start(); // initinal mqtt
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(__func__, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        start_file_server(base_path);
-        s_retry_num = 0;
+// ====== Delay us không busy-wait ======
+static inline void IRAM_ATTR wait_us(uint32_t us) {
+    timer_done = false;
+    gptimer_set_raw_count(gptimer, 0);
+
+    gptimer_alarm_config_t alarm_config = {
+        .alarm_count = us,
+        .flags.auto_reload_on_alarm = false
+    };
+    gptimer_set_alarm_action(gptimer, &alarm_config);
+
+    gptimer_start(gptimer);
+    while (!timer_done) {
+        taskYIELD(); // Nhường CPU
+    }
+    gptimer_stop(gptimer);
+}
+
+// ====== GPIO control ======
+static void IRAM_ATTR sensor_isr_handler(void* arg) {
+    uint64_t now_us = esp_timer_get_time();
+
+    if (!receiving_sequence) {
+        receiving_sequence = true;
+        seq_start_time_us = now_us;
+    }
+    last_frame_time_us = now_us;
+}
+
+
+static inline void set_gpio_both(int level) {
+    gpio_set_level(PIN_TX1, level);
+    gpio_set_level(PIN_TX2, level);
+}
+
+static void send_bit(bool bitVal) {
+    set_gpio_both(0);
+    wait_us(bitVal ? BIT1_LOW : BIT0_LOW);
+    set_gpio_both(1);
+    wait_us(bitVal ? BIT1_HIGH : BIT0_HIGH);
+}
+
+static void send_start(void) {
+    set_gpio_both(0);
+    wait_us(START_LOW);
+    set_gpio_both(1);
+    wait_us(START_HIGH);
+}
+
+static void send_frame(uint16_t mode16, uint32_t val32,
+                       uint16_t extra16, uint8_t pwm, uint8_t extra8, bool hasExtra) {
+    send_start();
+    for (int i = 15; i >= 0; i--) send_bit((mode16 >> i) & 1);
+    if (hasExtra) {
+        for (int i = 15; i >= 0; i--) send_bit((extra16 >> i) & 1);
+        for (int i = 7; i >= 0; i--) send_bit((pwm >> i) & 1);
+        for (int i = 7; i >= 0; i--) send_bit((extra8 >> i) & 1);
+    } else {
+        for (int i = 31; i >= 0; i--) send_bit((val32 >> i) & 1);
     }
 }
 
-void WIFI_initSTA(void)
-{
-
-    ESP_ERROR_CHECK(esp_netif_init());
-
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
+// ====== WiFi AP ======
+static void wifi_init_ap(void) {
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_ap();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
-            /* Authmode threshold resets to WPA2 ass default if password matches WPA2 standards (pasword len => 8).
-             * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
-             * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
-             * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.
-             */
+    wifi_config_t ap_config = {
+        .ap = {
+            .ssid = "ESP32_LED",
+            .ssid_len = 0,
+            .channel = 1,
+            .password = "66668888",
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_WPA_WPA2_PSK
         },
     };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
-    ESP_ERROR_CHECK(esp_wifi_start() );
+    if (strlen((char *)ap_config.ap.password) == 0) {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
 
-    ESP_LOGI(__func__, "wifi_init_sta finished.");
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    esp_wifi_start();
 }
-
-/*------------------------------------ MQTT ------------------------------------ */
-void publish_message(const char* topic, const char*nameFile) {
-    // Tạo đối tượng JSON
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL) {
-        ESP_LOGE(__func__, "Failed to create JSON object");
-        return;
-    }
-
-    // Thêm các trường vào JSON
-    cJSON_AddStringToObject(root, "namefile", nameFile);
-    
-   
-    // Chuyển đổi đối tượng JSON thành chuỗi
-    char *json_string = cJSON_Print(root);
-    if (json_string == NULL) {
-        ESP_LOGE(__func__, "Failed to print JSON string");
-        cJSON_Delete(root);
-        return;
-    }
-
-    // Publish thông điệp JSON
-    int msg_id = esp_mqtt_client_publish(client, topic, json_string, 0, 0, 0);
-    ESP_LOGI(__func__, "Sent publish successful, msg_id=%d", msg_id);
-
-    // Giải phóng bộ nhớ
-    cJSON_Delete(root);
-    free(json_string);
-}
-
-
-
-/*-------------------------------------TASKS--------------------------------------------*/
-/**
- * @brief Read data from MAX30102 and send to ring buffer
- * 
- * @param pvParameters 
- */
-volatile bool SDcard_flag = true;
-esp_err_t max30102_configure(i2c_dev_t *dev, struct max30102_record *record){
-    // Khởi tạo mô tả thiết bị I2C cho MAX30102
-    memset(dev, 0, sizeof(i2c_dev_t));
-    ESP_ERROR_CHECK(max30102_initDesc(dev, I2C_PORT, I2C_SDA_GPIO, I2C_SCL_GPIO));
-    
-    if(max30102_readPartID(dev) == ESP_OK) {
-      ESP_LOGI(__func__, "Found MAX30102 at address 0x%02x on port %d!", dev->addr, dev->port);
-    }
-    else {
-      ESP_LOGE(__func__, "Not found MAX30102 at address 0x%02x on port %d", dev->addr, dev->port);
-      return ESP_FAIL;
-    }
-
-    // Khởi tạo các thông số hoạt động của MAX30102
-    ESP_ERROR_CHECK(max30102_init(powerLed, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange, record, dev));
-    max30102_clearFIFO(dev);
-    ESP_LOGI(__func__, "MAX30102 configured successfully.");
-    return ESP_OK;
-}
-void read_max30102_task(void* parameter)
-{
-    i2c_dev_t dev;
-    struct max30102_record record;
-    if(max30102_configure(&dev, &record) != ESP_OK){
-        ESP_LOGE(pcTaskGetName(NULL), "Khoi tao cam bien khong thanh cong, loi I2C...");
-    }else ESP_LOGI(pcTaskGetName(NULL), "Khoi tao cam bien thanh cong !");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
-    size_t offset = 0;
-    
-    struct tm timeTemp = { 0 };
-    ds3231_get_time(&ds3231_device, &timeTemp);
-    sprintf(nameFilePPG,"%s_%d_%d_%d", "PPG",timeTemp.tm_hour,timeTemp.tm_min,timeTemp.tm_sec);
-    ESP_LOGI(__func__, "Get data MAX30102 start file %s\n", nameFilePPG);
-    TickType_t startTime = xTaskGetTickCount();
-    while (1)
-    {
-        // Bộ đệm tín hiệu
-        double ir_buffer[SAMPLE_LEN], red_buffer[SAMPLE_LEN];
-        int collected = 0;
-        unsigned long red[SAMPLE_LEN];
-        unsigned long ir[SAMPLE_LEN];
-        //Thu tín hiệu từ cảm biến
-        while (collected < SAMPLE_LEN) {
-            uint16_t number_of_newSample = max30102_check(&record, &dev); //Check the sensor, read up to 3 samples
-            //ESP_LOGI(__func__, "Number of new samples: %d", number_of_newSample);
-            while (max30102_available(&record)) //do we have new data?
-            {
-                ir_buffer[collected]  = (double) max30102_getFIFOIR(&record);
-                red_buffer[collected] = (double) max30102_getFIFORed(&record);
-                collected++;
-                red[offset] = max30102_getFIFORed(&record);
-                ir[offset] = max30102_getFIFOIR(&record);
-                offset++;
-                max30102_nextSample(&record); //We're finished with this sample so move to next sample
+// ====== Task tính LED từ số bậc ======
+void effect_task(void *arg) {
+    while (1) {
+        if (run_effect_flag) {
+            led_level = 0;
+            for (int i = 0; i < effect_steps; i++) {
+                led_level |= (1UL << i);
+                vTaskDelay(step_delay_ms);
             }
+            run_effect_flag = false;
+            ESP_LOGI("TX TASK","Mode hiệu ứng: Led level: %ld", led_level);
         }
-        
-        if (xSemaphoreTake(sdcard_write_mutex, portMAX_DELAY) == pdTRUE) { // Lấy semaphore
-            esp_err_t err_red = sdcard_write_32bit_DataToFile(nameFilePPG, red, offset);
-            esp_err_t err_ir = sdcard_write_32bit_DataToFile(nameFilePPG, ir, offset);
-            xSemaphoreGive(sdcard_write_mutex); // Nhả semaphore
-            if (err_red != ESP_OK) {
-                ESP_LOGE(__func__, "Ghi dữ liệu RED_MAX30102 vào SD card thất bại: %s", esp_err_to_name(err_red));
+        else if (update_steps_flag){
+            led_level = 0; // Tắt hết trước
+            for (int i = 0; i < led_steps; i++) {
+                led_level |= (1UL << i); // Bật thêm 1 bậc
             }
-            else {
-                ESP_LOGI(__func__, "Ghi dữ liệu RED_MAX30102 vào SD card thành công.");
-            }
-            if (err_ir != ESP_OK) {
-                ESP_LOGE(__func__, "Ghi dữ liệu IR_MAX30102 vào SD card thất bại: %s", esp_err_to_name(err_ir));
-            }
-            else {
-                ESP_LOGI(__func__, "Ghi dữ liệu IR_MAX30102 vào SD card thành công.");
-            }
-            offset = 0;
+            ESP_LOGI("TX TASK","Mode thường: Led level: %ld", led_level);
+            update_steps_flag = false;   
         }
         else {
-            ESP_LOGW(__func__, "Chờ server tải file INMP441 xong trước khi ghi dữ liệu...");
+            vTaskDelay(5);
         }
-        ESP_LOGI(TAG, "Đã thu thập đủ %d mẫu IR/RED", SAMPLE_LEN); 
-        // Xử lý Wavelet cấp 3 để tính nhịp tim
-        // khai báo thành phần cA, cD
-        double cA[SAMPLE_LEN], cD[SAMPLE_LEN], cA1[SAMPLE_LEN];
-        // khai bào thành phần khôi phục từ cA
-        double ucA[SAMPLE_LEN], ucA1[SAMPLE_LEN]; 
-        int cA_len = 0, cD_len = 0, cA1_len = 0;
-        int peaks[100], peak_count = 0;
-        double hr = 0.0;
-
-        // Đọc và xử lý từng khối dữ liệu
-        wavelet_transform(ir_buffer, SAMPLE_LEN, cA, &cA_len, cD, &cD_len);//phân tích level 1
-        wavelet_transform(cA, cA_len, cA1, &cA1_len, cD, &cD_len);//phân tích level 2
-        wavelet_transform(cA1, cA1_len, cA, &cA_len, cD, &cD_len);//phân tích level 3
-
-        // khôi phục tín hiệuhiệu
-        int k = cA_len * 2;
-        upsample(cA, cA_len, ucA, 2);
-        convolve(ucA, k, rdb4_low_pass_filter, FILTER_SIZE, ucA1);
-
-        k *= 2;
-        upsample(ucA1, k, ucA, 2);
-        convolve(ucA, k, rdb4_low_pass_filter, FILTER_SIZE, ucA1);
-
-        k *= 2;
-        upsample(ucA1, k, ucA, 2);
-        convolve(ucA, k, rdb4_low_pass_filter, FILTER_SIZE, ucA1);
-
-        // tìm định tín hiệu
-        double threshold = calculate_threshold(ir_buffer, SAMPLE_LEN);
-        peak_count = find_peaks(ucA1, SAMPLE_LEN, peaks, 100, threshold);
-        hr = calculate_heart_rate(peaks, peak_count, SAMPLE_RATE);
-
-        // Tính SpO2 từ tín hiệu RED và IR
-        double spo2 = calculate_spo2(red_buffer, ir_buffer, SAMPLE_LEN);
-
-        // In kết quả
-        ESP_LOGI(TAG, "  Nhịp tim: %.2f BPM", hr);
-        ESP_LOGI(TAG, "  SpO₂: %.2f %%", spo2);
-
-        for (int i = 0; i < peak_count; i++) {
-            ESP_LOGI(TAG, " Đỉnh %d tại vị trí %d", i + 1, peaks[i]);
-        }
-
-        ESP_LOGI(__func__, "Writing file %s is done", nameFilePPG);
-        ds3231_get_time(&ds3231_device, &timeTemp);
-        sprintf(nameFilePPG,"%s_%d_%d_%d", "PPG",timeTemp.tm_hour,timeTemp.tm_min,timeTemp.tm_sec); 
-        ESP_LOGI(__func__, "WCET: %ld\n", (xTaskGetTickCount() - startTime)*portTICK_PERIOD_MS);
-        vTaskDelay(100/portTICK_PERIOD_MS);
-        ESP_LOGI(__func__, "Get data MAX30102 start file %s", nameFilePPG);
-        startTime = xTaskGetTickCount();       
     }
-    vTaskDelete(NULL);
+}
+// ====== Task gửi dữ liệu ======
+static void tx_task(void *arg) {
+    while (1) {
+        if (!testMode) {
+            send_frame(MODE_DIEU_KHIEN, led_level, 0, 0, 0, false);
+        } else {
+            ESP_LOGI("TX TASK","Test mode: %d", testMode);
+            ESP_LOGI("TX TASK","PWM: %d", pwm_value);
+            if (frameCountInPhase % 2 == 0) {
+                send_frame(MODE_DIM_LED, 0, DIM_FIXED, pwm_value, DIM_EXTRA8, true);
+            } else {
+                send_frame(MODE_TEST_LED, led_level, 0, 0, 0, false);
+            }
+            frameCountInPhase++;
+            if (frameCountInPhase >= 16) {
+                testMode = false;
+                frameCountInPhase = 0;
+            }
+        }
+        vTaskDelay(FRAME_INTERVAL_MS);
+    }
 }
 
+static void sensor_task(void *arg) {
+    while (1) {
+        uint64_t now_us = esp_timer_get_time();
 
-static void initialize_nvs(void)
-{
-    esp_err_t error = nvs_flash_init();
-    if (error == ESP_ERR_NVS_NO_FREE_PAGES || error == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
+        if (receiving_sequence && (now_us - last_frame_time_us) > 10000) {
+            receiving_sequence = false;
+
+            float seq_duration_ms = (last_frame_time_us - seq_start_time_us) / 1000.0f;
+
+            if (seq_duration_ms >= 20 && seq_duration_ms <= 45) {
+                printf("Phát hiện cảm biến 1 (%.1f ms)\n", seq_duration_ms);
+            } else if (seq_duration_ms >= 70 && seq_duration_ms <= 90) {
+                printf("Phát hiện cảm biến 2 (%.1f ms)\n", seq_duration_ms);
+            } else if (seq_duration_ms > 100) {
+                printf("Phát hiện cả 2 cảm biến (%.1f ms)\n", seq_duration_ms);
+            } else {
+                printf("Không xác định (%.1f ms)\n", seq_duration_ms);
+            }
+        }
+
+        vTaskDelay(1);
+    }
+}
+
+static void sensor_init(void) {
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_POSEDGE, // Start pulse HIGH
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << PIN_SENSOR),
+        .pull_up_en = 0,
+        .pull_down_en = 0
+    };
+    gpio_config(&io_conf);
+
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(PIN_SENSOR, sensor_isr_handler, NULL);
+
+    xTaskCreatePinnedToCore(sensor_task, "SensorTask", 2048, NULL, 5, NULL, 0);
+}
+
+// ====== MAIN ======
+void app_main(void) {
+    gpio_config_t io_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << PIN_TX1) | (1ULL << PIN_TX2),
+    };
+
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
-        error = nvs_flash_init();
+        ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(error);
-}
+    ESP_ERROR_CHECK(ret);
 
-/**
- * @brief Read data from INMP441 and send to ring buffer
- * 
- * @param pvParameters 
- */
+    led_mutex = xSemaphoreCreateMutex();
 
-void readINMP441Task(void* parameter) {
-    i2s_install(&rx_channel); // Cấu hình kênh I2S sử dụng API mới
-    vTaskDelay(1000/portTICK_PERIOD_MS);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    ESP_LOGI(__func__, "Bắt đầu đọc dữ liệu từ INMP441...");
-    size_t bytesRead;
-    int16_t temp_buffer[SAMPLE_LEN_INMP+1] = {0}; // đủ để lưu 23040 mẫu
-    uint16_t offset = 0;
-    uint8_t count = 0;
+    gpio_config(&io_conf);
+    set_gpio_both(1);
 
-    struct tm timeTemp = {0};
-    ds3231_get_time(&ds3231_device, &timeTemp); // Lấy thời gian thực
-    memset(nameFilePCG, 0, sizeof(nameFilePCG));
-    sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
-    ESP_LOGI(__func__, "Get data INMP441 start file: %s", nameFilePCG);
-    TickType_t startTime = xTaskGetTickCount();
+    wifi_init_ap();
+    timer_init_us();
+    sensor_init();
+
+    xTaskCreatePinnedToCore(tx_task, "TX_Task", 4096, NULL, 8, NULL, 1);
+    xTaskCreatePinnedToCore(effect_task, "Effect_Task", 2048, NULL, 5, NULL, 1);
+    start_file_server();
     
     while (1) {
-        vTaskDelay(10); // tránh watchdog reset
-        // Đọc dữ liệu từ microphone
-        esp_err_t ret = i2s_channel_read(rx_channel, &buffer32, sizeof(buffer32), &bytesRead, 100);
-        if (ret == ESP_ERR_TIMEOUT) {
-            ESP_LOGE(__func__, "Timeout khi đọc dữ liệu: %s", esp_err_to_name(ret));
-            continue;
-        } else if (ret != ESP_OK) {
-            ESP_LOGE(__func__, "Lỗi đọc dữ liệu: %s", esp_err_to_name(ret));
-            break;
-        }
-        int samplesRead = bytesRead / sizeof(int32_t);
-        //ESP_LOGI(__func__, "Số mẫu dữ liệu INMP441: %d", samplesRead);
-        if((offset + samplesRead) <= SAMPLE_LEN_INMP){ 
-            for (int i = 0; i < samplesRead; i++) {
-                int16_t sample = (int16_t)(buffer32[i] >> 8); // Lấy 16-bit có ý nghĩa từ 24-bit gốc
-                temp_buffer[i + offset] = sample;
-            }
-            offset += samplesRead;
-        }
-        else{
-            TickType_t elapsedTime = xTaskGetTickCount();
-            if (xSemaphoreTake(sdcard_write_mutex, portMAX_DELAY) == pdTRUE) { // Lấy semaphore
-                esp_err_t err = sdcard_writeBinaryDataToFile(nameFilePCG, temp_buffer, offset);
-                xSemaphoreGive(sdcard_write_mutex); // Nhả semaphore
-                if (err != ESP_OK) {
-                    ESP_LOGE(__func__, "Ghi dữ liệu INMP441 vào SD card thất bại: %s", esp_err_to_name(err));
-                }
-                else {
-                    ESP_LOGI(__func__, "Ghi dữ liệu INMP441 vào SD card thành công.");
-                }
-            }
-            else {
-                ESP_LOGE(__func__, "Không thể lấy semaphore ghi SD card cho INMP441.");
-            }
-            count++;
-            offset = 0;
-            memset(temp_buffer, 0, sizeof(temp_buffer));
-            ESP_LOGI(__func__, "Thoi gian ghi vào SD card: %ld ms\n", (xTaskGetTickCount() - elapsedTime)*portTICK_PERIOD_MS);
-        }
-        if(count >= 10){
-            publish_message("message/nameFilePCG", nameFilePCG);
-            ESP_LOGI(__func__, "WCET: %ld ms\n", (xTaskGetTickCount() - startTime)*portTICK_PERIOD_MS);
-            ESP_LOGI(__func__, "Đợi server tải file xong...");
-            xSemaphoreTake(sdcard_write_mutex, portMAX_DELAY);
-            xSemaphoreTake(file_inmp_downloaded_semaphore, portMAX_DELAY);  // Block task
-            ESP_LOGI(__func__, "Server đã tải xong, tiếp tục ghi file mới...");
-            xSemaphoreGive(sdcard_write_mutex); // Release task
-            startTime = xTaskGetTickCount();
-            ds3231_get_time(&ds3231_device, &timeTemp);
-            sprintf(nameFilePCG, "PCG_%02d_%02d_%02d", timeTemp.tm_hour, timeTemp.tm_min, timeTemp.tm_sec);
-            vTaskDelay(100 / portTICK_PERIOD_MS);
-            ESP_LOGI(__func__, "Get data INMP441 start file: %s", nameFilePCG);
-            count = 0;
-        } 
+        vTaskDelay(100);
     }
-}
-
-void sntp_init_func()
-{
-    ESP_LOGI(__func__, "Initializing SNTP.");
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
-    sntp_init();
-}
-
-esp_err_t sntp_setTime(struct tm *timeInfo, time_t *timeNow)
-{
-    for (size_t i = 0; (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET); i++)
-    {
-        ESP_LOGI(__func__, "Waiting for system time to be set...");
-        vTaskDelay(500 / portTICK_PERIOD_MS);
-    }
-    time(timeNow);
-    localtime_r(timeNow, timeInfo);
-
-    char timeString[64];
-
-    // Set timezone to VietNam Standard Time
-    setenv("TZ", "GMT-07", 1);
-    tzset();
-    localtime_r(timeNow, timeInfo);
-    strftime(timeString, sizeof(timeString), "%c", timeInfo);
-    ESP_LOGI(__func__, "The current date/time in Viet Nam is: %s ", timeString);
-    return ESP_OK;
-}
-
-/*--------------------------------------MAIN_APP-------------------------------------------*/
-void app_main(void)
-{
-    // Initialize SPI Bus
-    
-    ESP_LOGI(__func__, "Initialize SD card with SPI interface.");
-    esp_vfs_fat_mount_config_t mount_config_t = MOUNT_CONFIG_DEFAULT();
-    spi_bus_config_t spi_bus_config_t = SPI_BUS_CONFIG_DEFAULT();
-    sdmmc_host_t host_t = SDSPI_HOST_DEFAULT();
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = CONFIG_PIN_NUM_CS;
-    slot_config.host_id = host_t.slot;
-
-    sdmmc_card_t SDCARD;
-    ESP_ERROR_CHECK(sdcard_initialize(&mount_config_t, &SDCARD, &host_t, &spi_bus_config_t, &slot_config));
-    
-    sdcard_write_mutex = xSemaphoreCreateMutex();
-    file_inmp_downloaded_semaphore = xSemaphoreCreateBinary();
-
-    if (sdcard_write_mutex == NULL) {
-        ESP_LOGE(__func__, "Failed to create SD card write mutex");
-        return;
-    } else {
-        ESP_LOGI(__func__, "SD card write mutex created OK");
-    }
-
-    ESP_LOGI(__func__, "Initialize nvs partition.");
-    initialize_nvs();
-    // Wait 1 second for memory initialization
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    WIFI_initSTA();
-    // initinal mqtt
-    mqtt_app_start();
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    ESP_LOGI(__func__, "Set up output control pillow\n");
-    gpio_set_direction(2, GPIO_MODE_OUTPUT);    // bom 1
-    gpio_set_direction(4, GPIO_MODE_OUTPUT);    // bom 2
-    gpio_set_direction(16, GPIO_MODE_OUTPUT);   // bom 3
-
-    gpio_set_direction(17, GPIO_MODE_OUTPUT);    // xa 1
-    gpio_set_direction(3, GPIO_MODE_OUTPUT);    // xa 2
-    gpio_set_direction(1, GPIO_MODE_OUTPUT);   // xa 3
-    
-    //update time use sntp
-    // time_t timeNow = 0;
-    // struct tm timeInfo = { 0 };
-    // sntp_init_func();
-    // sntp_setTime(&timeInfo, & timeNow);
-    // mktime(&timeInfo);
-
-    ESP_LOGI(__func__, "Initialize DS3231 module(I2C/Wire%d).", CONFIG_RTC_I2C_PORT);
-    ESP_ERROR_CHECK_WITHOUT_ABORT(i2cdev_init());
-    memset(&ds3231_device, 0, sizeof(i2c_dev_t));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(ds3231_initialize(&ds3231_device, CONFIG_RTC_I2C_PORT, CONFIG_RTC_PIN_NUM_SDA, CONFIG_RTC_PIN_NUM_SCL));
-    // timeInfo.tm_sec += 2;
-    // timeInfo.tm_mon += 1;
-    // timeInfo.tm_year = 2024;
-
-    //ds3231_set_time(&ds3231_device, &timeInfo);
-
-    // Create tasks
-    xTaskCreatePinnedToCore(read_max30102_task, "read_max30102_task", 1024 * 63,NULL, 20, &readMAXTask_handle, 0);
-    xTaskCreatePinnedToCore(readINMP441Task, "readINM411", 1024 * 50, NULL, 19, &readINMTask_handle, 1);  // ?? Make max30102 task and inm task have equal priority can make polling cycle of max3012 shorter ??  
-    
-    //xTaskCreatePinnedToCore(sendDataToServer, "sendDataToServer", 1024 * 10,NULL,  10, &sendDataToServer_handle, 0);
-    //xTaskCreatePinnedToCore(listenFromMQTT, "listenFromMQTT", 1024 * 3,NULL,  5, &listenFromMQTT_handle, 0);
 }

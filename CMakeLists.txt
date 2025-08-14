@@ -10,4 +10,4 @@ set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/example/common_components/protocol_examp
 
 set(EXTRA_COMPONENT_DIRS ${CMAKE_CURRENT_LIST_DIR}/component)
 
-project(SmartPillow)
+project(LED_contorl)
